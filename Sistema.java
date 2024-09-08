@@ -34,8 +34,10 @@ public class Sistema {
 
 	public class Memory {
 		public Word[] pos; // pos[i] é a posição i da memória. cada posição é uma palavra.
+		public int tamMem;
 
 		public Memory(int size) {
+			this.tamMem = size;
 			pos = new Word[size];
 			for (int i = 0; i < pos.length; i++) {
 				pos[i] = new Word(Opcode.___, -1, -1, -1);
@@ -478,12 +480,103 @@ public class Sistema {
 	public HW hw;
 	public SO so;
 	public Programs progs;
+	public MemoryMananger memoryMananger;
 
-	public Sistema(int tamMem) {
+	public Sistema2(int tamMem, int tamPage) {
 		hw = new HW(tamMem); // memoria do HW tem tamMem palavras
 		so = new SO(hw);
+		memoryMananger = new MemoryMananger(tamPage);
 		hw.cpu.setUtilities(so.utils); // permite cpu fazer dump de memoria ao avancar
 		progs = new Programs();
+	}
+
+	public class MemoryMananger{
+		public int tamFrames;                   //tamanho de frames
+		public int numFrames;                   //número  de frames
+		public int numPages;                    //número  de páginas     
+		public Boolean[] frameMemoryBlockUsed;  //Array que controla o uso de cada frame (By: Pedro - Pensei em criar para não ter que sempre percorrer toda a memória para encontrar um frame vago) 
+		
+		public MemoryMananger(int numPages){
+			this.numPages  = numPages;                                 //pegamos a quantidade de páginas
+			this.numFrames = (hw.mem.tamMem / this.numPages);          //cáculo para pegar o número de frames
+			this.tamFrames = this.numPages;                            //tamanho de um frame, é a quantidade de páginas
+			this.frameMemoryBlockUsed = new Boolean[this.numFrames];   //nosso array de frames usados com o tamanho de frames.	
+		}
+		
+		/**
+		 * Essa função visa verificar se temos espaço em memória para o tamanho de Words de um processo 
+		 * @return quantidade de espaços vázios em memória
+		 */
+		private int getQtdNullPointers(){
+			int searched = 0;
+			
+			for(int i = 0; i < hw.mem.pos.length ; i++){
+				if(hw.mem.pos[i].opc !=  Opcode.___){
+					searched++;	
+				}
+			}
+
+			return searched;
+		}
+
+		/**
+		 * Método para alocar a memória para um processo
+		 * @param words   - Palabras do processo que queremos alocar
+		 * @return        - uma lista com endereços para os frames utilizados na alocação
+		 */
+		public ArrayList<Integer> alocateMemory(Word[] words){
+			ArrayList<Integer> frames =  new ArrayList<>();  //Array de retornopara a "tradução" da posição dos frames em memória 
+			int addedWords = 0;                              //Contador para contrlar o número de palavras adicionadas na memória
+			int atualFrame = -1;                             //Variável usada para controlar o frame atual em que estamos UTILIZADO (ou seja, ele não estava ocupado, e usamos ele para guardar algumas das palavras solicitadas).
+			long startTime = System.currentTimeMillis();
+
+			if (getQtdNullPointers() < words.length){
+				//Cancelar, nossa memória está sendo utilizada no momento, processo deve ficar fora da fila de prontos e ser colocado em uma fila para subir na memória
+				//devemos estourar uma interrupção, e apenas dizer que não temos memória para subir o processo.
+				return null;
+			}
+
+			//Enquanto não tivermos adicionado todas as palavras
+			while(addedWords != words.length){
+				//percorrer o array de frames ocupados procurando frames vagos para alocar a memória
+				for(int i = 0 ; i < this.frameMemoryBlockUsed.length; i++){
+					if(!this.frameMemoryBlockUsed[i]){                       //frame vago para utilizarmos	
+						addedWords += addWordsInFrame(atualFrame, i, words); //Adicionamos as palavras no frame e incrementamos a variável 
+						this.frameMemoryBlockUsed[i] = true;                 //Adicinamos true a posição do array de frames usados 
+						frames.add(atualFrame * numFrames);                  //Adidionamos o endereço em memória do frame na lista de retorno
+						atualFrame++;                                        //Incrementamos um no frame (não precisamos necessariamente usar essa variável, poderiamos usar o i para isso, mas criei pra facilitar)
+					}
+				}
+
+				if((addedWords != words.length) && (System.currentTimeMillis() - startTime) > 30000){
+					//gerar erro/interrupção 
+					//se cairmos nesse if quer dizer que estamos muito tempo tentando carregar um processo na memória
+					//Não sei como ainda mas precisariamos desalocar o que alocamos
+					//Por enquanto não vamos fazer nada
+				}
+			}
+
+			return frames;
+		}
+				
+		/**
+		 * Salva as palavras específicas até o limite de um frame
+		 * @param frame       - número do frame atual 
+		 * @param initIndex   - indice de inicio do array de words que vamos salvar no frame (depois podemos mandar só um array cortado)
+		 * @param words       - array com todas as palavras (temos que salvar só o que cabe no frame a partir do primeiro indice)
+		 * @return            - retornamos um inteiro referente ao número de palavras adicionadas
+		 */
+		private int addWordsInFrame(int frame, int initIndex, Word[] words){
+			int indexMemory = frame * numFrames;
+			int result = 0;
+
+			for(int i = initIndex ; i < (initIndex + this.tamFrames) ; i++){
+				hw.mem.pos[indexMemory] = words[i];
+				result++;
+			}
+
+			return result;
+		}
 	}
 
 	public void run() {
@@ -510,7 +603,7 @@ public class Sistema {
 	// -------------------------------------------------------------------------------------------------------
 	// ------------------- instancia e testa sistema
 	public static void main(String args[]) {
-		Sistema s = new Sistema(1024);
+		Sistema2 s = new Sistema2(1024, 8);
 		s.run();
 	}
 
