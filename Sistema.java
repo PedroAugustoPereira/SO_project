@@ -482,7 +482,7 @@ public class Sistema {
 	public Programs progs;
 	public MemoryMananger memoryMananger;
 
-	public Sistema2(int tamMem, int tamPage) {
+	public Sistema(int tamMem, int tamPage) {
 		hw = new HW(tamMem); // memoria do HW tem tamMem palavras
 		so = new SO(hw);
 		memoryMananger = new MemoryMananger(tamPage);
@@ -603,7 +603,7 @@ public class Sistema {
 	// -------------------------------------------------------------------------------------------------------
 	// ------------------- instancia e testa sistema
 	public static void main(String args[]) {
-		Sistema2 s = new Sistema2(1024, 8);
+		Sistema s = new Sistema(1024, 8);
 		s.run();
 	}
 
