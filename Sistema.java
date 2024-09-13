@@ -20,6 +20,9 @@
 //    Veja o main.  Ele instancia o Sistema com os elementos mencionados acima.
 //           em seguida solicita a execução de algum programa com  loadAndExec
 
+import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.util.*;
 
 public class Sistema {
@@ -465,12 +468,14 @@ public class Sistema {
 		public InterruptHandling ih;
 		public SysCallHandling sc;
 		public Utilities utils;
+		public int tamPage;
 
-		public SO(HW hw) {
+		public SO(HW hw, int tamPage) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
 			sc = new SysCallHandling(hw); // chamadas de sistema
 			hw.cpu.setAddressOfHandlers(ih, sc);
 			utils = new Utilities(hw);
+			this.tamPage = tamPage;
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -484,98 +489,136 @@ public class Sistema {
 
 	public Sistema(int tamMem, int tamPage) {
 		hw = new HW(tamMem); // memoria do HW tem tamMem palavras
-		so = new SO(hw);
-		memoryMananger = new MemoryMananger(tamPage);
+		so = new SO(hw, tamPage);
+		memoryMananger = new MemoryMananger();
 		hw.cpu.setUtilities(so.utils); // permite cpu fazer dump de memoria ao avancar
 		progs = new Programs();
 	}
 
 	public class MemoryMananger{
-		public int tamFrames;                   //tamanho de frames
-		public int numFrames;                   //número  de frames
-		public int numPages;                    //número  de páginas     
-		public Boolean[] frameMemoryBlockUsed;  //Array que controla o uso de cada frame (By: Pedro - Pensei em criar para não ter que sempre percorrer toda a memória para encontrar um frame vago) 
+		public int numFrames;                   //número  de frames 
+		public boolean[] frameMemoryBlockUsed;  //Array que controla o uso de cada frame (By: Pedro - Pensei em criar para não ter que sempre percorrer toda a memória para encontrar um frame vago) 
 		
-		public MemoryMananger(int numPages){
-			this.numPages  = numPages;                                 //pegamos a quantidade de páginas
-			this.numFrames = (hw.mem.tamMem / this.numPages);          //cáculo para pegar o número de frames
-			this.tamFrames = this.numPages;                            //tamanho de um frame, é a quantidade de páginas
-			this.frameMemoryBlockUsed = new Boolean[this.numFrames];   //nosso array de frames usados com o tamanho de frames.	
+		public MemoryMananger(){
+			this.numFrames = (hw.mem.tamMem / so.tamPage);          //cáculo para pegar o número de frames
+			this.frameMemoryBlockUsed = new boolean[this.numFrames];   //nosso array de frames usados com o tamanho de frames.	
 		}
-		
+
 		/**
-		 * Essa função visa verificar se temos espaço em memória para o tamanho de Words de um processo 
-		 * @return quantidade de espaços vázios em memória
+		 * Método responsável por alocar um array de palavras em frames livre de memória
+		 * @param words array de palavras de um programa
+		 * @return mapeamento das páginas do programa com seus respectivos frames
 		 */
-		private int getQtdNullPointers(){
-			int searched = 0;
-			
-			for(int i = 0; i < hw.mem.pos.length ; i++){
-				if(hw.mem.pos[i].opc !=  Opcode.___){
-					searched++;	
+		public ArrayList<Integer> alocProg(Word[] words){
+			// Pega a quantidade de páginas necessárias para alocar em frames
+			ArrayList<Word[]> pages = getPages(words);
+
+			// Pega os frames que estão livres
+			ArrayList<Integer> frames = getFrames(pages.size());
+
+			// Resposta com o mapeamento das páginas com os frames
+			ArrayList<Integer> mapFrames = new ArrayList<>();
+
+			// Valida se temos frames livres
+			if (frames != null){
+				// Percorre cada pagina do programa
+				for (int i = 0; i < pages.size(); i++){
+					// Aloca as palavras da pagina no frame livre
+					this.setWordsInFrame(frames.get(i), pages.get(i));
+					mapFrames.add(frames.get(i));
 				}
+			} else {
+				System.out.println("Não há frames disponíveis para alocar as páginas do programa.");
 			}
 
-			return searched;
+			// Array com o mapeamento dos frames
+			return mapFrames;
 		}
 
 		/**
-		 * Método para alocar a memória para um processo
-		 * @param words   - Palabras do processo que queremos alocar
-		 * @return        - uma lista com endereços para os frames utilizados na alocação
+		 * Método responsável por retornar a quantidade de páginas com suas palavras
+		 * @param words array de palavras que serão divididas em páginas
+		 * @return lista de páginas com palavras
 		 */
-		public ArrayList<Integer> alocateMemory(Word[] words){
-			ArrayList<Integer> frames =  new ArrayList<>();  //Array de retornopara a "tradução" da posição dos frames em memória 
-			int addedWords = 0;                              //Contador para contrlar o número de palavras adicionadas na memória
-			int atualFrame = -1;                             //Variável usada para controlar o frame atual em que estamos UTILIZADO (ou seja, ele não estava ocupado, e usamos ele para guardar algumas das palavras solicitadas).
-			long startTime = System.currentTimeMillis();
+		private ArrayList<Word[]> getPages(Word[] words){
+			// Pega tamanho do programa que solicitou lugar na memória
+			int tamProg = words.length;
 
-			if (getQtdNullPointers() < words.length){
-				//Cancelar, nossa memória está sendo utilizada no momento, processo deve ficar fora da fila de prontos e ser colocado em uma fila para subir na memória
-				//devemos estourar uma interrupção, e apenas dizer que não temos memória para subir o processo.
-				return null;
-			}
+			// Calcula quantos frames serão necessários
+			int totalPages = new BigDecimal(tamProg)
+				.divide(new BigDecimal(so.tamPage))
+				.round(new MathContext(0, RoundingMode.UP))
+				.intValue();
 
-			//Enquanto não tivermos adicionado todas as palavras
-			while(addedWords != words.length){
-				//percorrer o array de frames ocupados procurando frames vagos para alocar a memória
-				for(int i = 0 ; i < this.frameMemoryBlockUsed.length; i++){
-					if(!this.frameMemoryBlockUsed[i]){                       //frame vago para utilizarmos	
-						addedWords += addWordsInFrame(atualFrame, i, words); //Adicionamos as palavras no frame e incrementamos a variável 
-						this.frameMemoryBlockUsed[i] = true;                 //Adicinamos true a posição do array de frames usados 
-						frames.add(atualFrame * numFrames);                  //Adidionamos o endereço em memória do frame na lista de retorno
-						atualFrame++;                                        //Incrementamos um no frame (não precisamos necessariamente usar essa variável, poderiamos usar o i para isso, mas criei pra facilitar)
+			// Array com as paginas do programa
+			ArrayList<Word[]> pages = new ArrayList<>();
+
+			// Percorre o total de paginas do programa
+			for (int i = 0; i < totalPages ; i++){
+				// Aloca a posicao inicial da pagina
+				int indexWord = i * so.tamPage;
+				Word[] pageSlice = new Word[so.tamPage];
+
+				// A partir do comeco da pagina, percorre cada palavra
+				for (int j = 0 ; j < so.tamPage; j++){
+					// Se a posicao na palavra nao for nula, aloca a palavra no array
+					if (words[indexWord] != null){
+						pageSlice[j] = words[indexWord];
+						indexWord++;
+					} else{
+						System.out.println("Não há mais palavras a serem alocadas na página.");
+						break;
 					}
 				}
+				// Coloca a pagina criada no array de paginas
+				pages.add(pageSlice);
+			}
 
-				if((addedWords != words.length) && (System.currentTimeMillis() - startTime) > 30000){
-					//gerar erro/interrupção 
-					//se cairmos nesse if quer dizer que estamos muito tempo tentando carregar um processo na memória
-					//Não sei como ainda mas precisariamos desalocar o que alocamos
-					//Por enquanto não vamos fazer nada
+			// Retorna o array de paginas
+			return pages;
+		}
+
+		/**
+		 * Método responsável por pegar uma quantidade requisitada de frames livres em memória
+		 * @param pages quantidade de frames solicitados
+		 * @return array com o mapeamento de frames livres
+		 */
+		private ArrayList<Integer> getFrames(int pages){
+			// Conta a quantidade de páginas na response
+			int countPages = 0;
+			// Responsável por informar quais frames estão livres
+			ArrayList<Integer> frames = new ArrayList<>();
+
+			// Percorre o array de status dos frames
+			for (int i = 0; i < this.frameMemoryBlockUsed.length; i++) {
+				// Valida se temos frames disponíveis para o programa
+				if (countPages == pages){
+					return frames;
+				}
+
+				// Adiciona o index do frame na resposta
+				if (this.frameMemoryBlockUsed[i] == false){
+					frames.add(i);
+					countPages++;
 				}
 			}
-
-			return frames;
+			// Caso não encontre frames suficientes, retorna nulo 
+			return null;
 		}
-				
+
 		/**
-		 * Salva as palavras específicas até o limite de um frame
-		 * @param frame       - número do frame atual 
-		 * @param initIndex   - indice de inicio do array de words que vamos salvar no frame (depois podemos mandar só um array cortado)
-		 * @param words       - array com todas as palavras (temos que salvar só o que cabe no frame a partir do primeiro indice)
-		 * @return            - retornamos um inteiro referente ao número de palavras adicionadas
+		 * Método responsável por alocar as palavras no frame em memória
+		 * @param indexFrame index do frame livre
+		 * @param words array de palavras que será alocado
 		 */
-		private int addWordsInFrame(int frame, int initIndex, Word[] words){
-			int indexMemory = frame * numFrames;
-			int result = 0;
+		private void setWordsInFrame(int indexFrame, Word[] words){
+			// Pega o endereço inicial do frame em memória
+			int memPos = indexFrame * so.tamPage;
 
-			for(int i = initIndex ; i < (initIndex + this.tamFrames) ; i++){
-				hw.mem.pos[indexMemory] = words[i];
-				result++;
+			// Percorre o array de palavras e aloca no frame
+			for (int i = 0; i < words.length; i++){
+				hw.mem.pos[memPos + i] = words[i];
 			}
-
-			return result;
 		}
 	}
 
