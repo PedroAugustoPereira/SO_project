@@ -536,6 +536,26 @@ public class Sistema {
 		}
 
 		/**
+		 * Método responsável desalocar o espaço reservado por um programa
+		 * @param mapFrames um ArrayList indicando o endereço lógico dos frames
+		 */
+		public void dealLocProg(ArrayList<Integer> mapFrames){
+			//Percorre o map de frames
+			for(int i = 0 ; i < mapFrames.size() ; i++){
+				//Pega o endereço físico do frame
+				int indexWord = mapFrames.get(i) * so.tamPage;
+
+				//Percorre todos os endereços reservados do frame a partiri do seu início
+				for(int j = indexWord ; j < (indexWord + so.tamPage) ; j++){
+					hw.mem.pos[j] = new Word(Opcode.___, -1, -1, -1); //desaloca os espaços do frame	
+				}
+
+				//Coloca a posição do frame como livre
+				this.frameMemoryBlockUsed[indexWord] = false;
+			}
+		}
+
+		/**
 		 * Método responsável por retornar a quantidade de páginas com suas palavras
 		 * @param words array de palavras que serão divididas em páginas
 		 * @return lista de páginas com palavras
@@ -631,7 +651,8 @@ public class Sistema {
 		// 	so.utils.loadAndExec(p.image);
 		// }
 
-		this.memoryMananger.alocProg(progs.progs[0].image);
+		this.memoryMananger.dealLocProg(this.memoryMananger.alocProg(progs.progs[0].image));  
+		
 
 
 
