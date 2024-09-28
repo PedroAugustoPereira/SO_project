@@ -638,7 +638,8 @@ public class Sistema {
 
 			// Percorre o array de palavras e aloca no frame
 			for (int i = 0; i < words.length; i++){
-				hw.mem.pos[memPos + i] = words[i];
+				if(words[i] != null)
+					hw.mem.pos[memPos + i] = words[i];
 			}
 		}
 	}
