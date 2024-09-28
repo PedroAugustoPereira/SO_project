@@ -419,7 +419,7 @@ public class Sistema {
 		public Utilities(HW _hw) {
 			hw = _hw;
 		}
-
+		
 		private void loadProgram(Word[] p) {
 			Word[] m = hw.mem.pos; // m[] é o array de posições memória do hw
 			for (int i = 0; i < p.length; i++) {
@@ -546,7 +546,7 @@ public class Sistema {
 
 			// Calcula quantos frames serão necessários
 			int totalPages = new BigDecimal(tamProg)
-				.divide(new BigDecimal(so.tamPage))
+				.divide(new BigDecimal(so.tamPage), 0, RoundingMode.CEILING)
 				.round(new MathContext(0, RoundingMode.UP))
 				.intValue();
 
@@ -562,7 +562,7 @@ public class Sistema {
 				// A partir do comeco da pagina, percorre cada palavra
 				for (int j = 0 ; j < so.tamPage; j++){
 					// Se a posicao na palavra nao for nula, aloca a palavra no array
-					if (words[indexWord] != null){
+					if ((indexWord < words.length) && (words[indexWord] != null)){
 						pageSlice[j] = words[indexWord];
 						indexWord++;
 					} else{
@@ -598,6 +598,7 @@ public class Sistema {
 
 				// Adiciona o index do frame na resposta
 				if (this.frameMemoryBlockUsed[i] == false){
+					this.frameMemoryBlockUsed[i] = true;
 					frames.add(i);
 					countPages++;
 				}
@@ -623,12 +624,16 @@ public class Sistema {
 	}
 
 	public void run() {
-		for (Program p : progs.progs) {
-			System.out.println("################################################### ");
-			System.out.println("################################################### ");
-			System.out.println("-------------------- " + p.name);
-			so.utils.loadAndExec(p.image);
-		}
+		// for (Program p : progs.progs) {
+		// 	System.out.println("################################################### ");
+		// 	System.out.println("################################################### ");
+		// 	System.out.println("-------------------- " + p.name);
+		// 	so.utils.loadAndExec(p.image);
+		// }
+
+		this.memoryMananger.alocProg(progs.progs[0].image);
+
+
 
 		// so.utils.loadAndExec(progs.retrieveProgram("fatorial"));
 		// fibonacci10,
