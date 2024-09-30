@@ -483,6 +483,13 @@ public class Sistema {
 		public void handle() { // apenas avisa - todas interrupcoes neste momento finalizam o programa
 			System.out.println("                                               SYSCALL pars:  " + hw.cpu.reg[8] + " / "
 					+ hw.cpu.reg[9]);
+			// if(hw.cpu.reg[8] == 1){
+			// 	Scanner scanner = new Scanner(System.in);
+			// 	hw.cpu.reg[9] = scanner.nextInt();
+			// 	scanner.close();
+			// } else {
+			// 	System.out.println(hw.cpu.reg[9]);
+			// }
 		}
 	}
 
@@ -1093,7 +1100,7 @@ public class Sistema {
 
 		public boolean checkTimerInterrupt(){
 			if(so.processManager.running != null){
-				if(((System.currentTimeMillis() - so.processManager.running.startTime) * 1000) >= maxTime){
+				if(((System.currentTimeMillis() - so.processManager.running.startTime) * 100) >= maxTime){
 					return true;
 				}
 			}
