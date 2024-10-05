@@ -23,7 +23,7 @@ import java.math.BigDecimal;
 import java.math.MathContext;
 import java.math.RoundingMode;
 import java.util.*;
-
+import java.util.concurrent.Semaphore;
 
 public class Sistema {
 
@@ -85,9 +85,10 @@ public class Sistema {
 		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow, intSTOP;
 	}
 
-	public class CPU {
+	public class CPU implements Runnable{
 		private int maxInt; // valores maximo e minimo para inteiros nesta cpu
 		private int minInt;
+
 		// CONTEXTO da CPU ...
 		private int pc; // ... composto de program counter,
 		private Word ir; // instruction register,
@@ -98,25 +99,25 @@ public class Sistema {
 		// nas proximas versoes isto pode modificar
 
 		private Word[] m; // m é o array de memória "física", CPU tem uma ref a m para acessar
-
 		private InterruptHandling ih; // significa desvio para rotinas de tratamento de Int - se int ligada, desvia
 		private SysCallHandling sysCall; // significa desvio para tratamento de chamadas de sistema
-
-		private boolean cpuStop; // flag para parar CPU - caso de interrupcao e stop - nesta versao acaba o
-									// sistema no fim do prog
+		private boolean cpuStop; // flag para parar CPU - caso de interrupcao e stop - nesta versao acaba o sistema no fim do prog
 
 		// auxilio aa depuração
 		private boolean debug; // se true entao mostra cada instrucao em execucao
 		private Utilities u; // para debug (dump)
 
-		public CPU(Memory _mem, boolean _debug) { // ref a MEMORIA e interrupt handler passada na criacao da CPU
+		private Semaphore readyCPU, finishedCPU;
+
+		public CPU(Memory _mem, boolean _debug, Semaphore _readyCPU, Semaphore _finishedCPU) { // ref a MEMORIA e interrupt handler passada na criacao da CPU
 			maxInt = 32767; // capacidade de representacao modelada
 			minInt = -32767; // se exceder deve gerar interrupcao de overflow
 			m = _mem.pos; // usa o atributo 'm' para acessar a memoria, só para ficar mais pratico
 			reg = new int[10]; // aloca o espaço dos registradores - regs 8 e 9 usados somente para IO
+			readyCPU = _readyCPU;
+			finishedCPU = _finishedCPU;
 
 			debug = _debug; // se true, print da instrucao em execucao
-
 		}
 
 		public void setUtilities(Utilities _u) {
@@ -413,6 +414,29 @@ public class Sistema {
 				}
 			} // FIM DO CICLO DE UMA INSTRUÇÃO
 		}
+
+		@Override
+		public void run() {
+			while (true) {
+				try {
+					// CPU aguarda sinal para rodar (semáforo)
+					readyCPU.acquire();
+					
+					// Processo está rodando
+					System.out.println("CPU is running");
+					// Roda o processo na CPU (possui o timer de interrupção lá dentro)
+					hw.cpu.run(false);
+					// Processo finalizou ou foi interrompido, CPU livre
+					System.out.println("CPU is free");
+	
+					// Libera o semáforo para o escalonador (semáforo)
+					finishedCPU.release();
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				}
+				// Espera o sinal para liberar a CPU rodar (semáforo)
+			}
+		}
 	}
 	// ------------------ C P U - fim
 	// -----------------------------------------------------------------------
@@ -424,9 +448,9 @@ public class Sistema {
 		public Memory mem;
 		public CPU cpu;
 
-		public HW(int tamMem) {
+		public HW(int tamMem, Semaphore readyCPU, Semaphore finishedCPU) {
 			mem = new Memory(tamMem);
-			cpu = new CPU(mem, true); // true liga debug
+			cpu = new CPU(mem, true, readyCPU, finishedCPU); // true liga debug
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -500,9 +524,11 @@ public class Sistema {
 	// carga na memória
 	public class Utilities {
 		private HW hw;
+		private Semaphore readyToExecute;
 
-		public Utilities(HW _hw) {
+		public Utilities(HW _hw, Semaphore _readyToExecute) {
 			hw = _hw;
+			readyToExecute = _readyToExecute;
 		}
 		
 		private void loadProgram(Word[] p) {
@@ -639,16 +665,11 @@ public class Sistema {
 		}
 
 		public void execAll(){
-			// for(int i = 0 ; i <2 ; i++){
-			// 	so.processManager.createProgram(progs.progs[i], null);		
-			// }
+			// Informa que todos os processos da fila de prontos estão rodando
+			System.out.println("Executando todos os processos");
 
-			for(Program programAux :  progs.progs){
-				so.processManager.createProgram(programAux, null);	
-			}	
-
-			so.scheduler.runningNext(null);
-			hw.cpu.run(true);
+			// Libera o escalonador para rodar todos os processos da fila de prontos
+			readyToExecute.release();
 		}
 	}
 
@@ -660,14 +681,14 @@ public class Sistema {
 		public ProcessManager processManager;
 		public Scheduler scheduler;  
 
-		public SO(HW hw, int tamPage) {
+		public SO(HW hw, int tamPage, Semaphore _readyToExecute, Semaphore _finishedCPU, Semaphore _readyCPU) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
 			sc = new SysCallHandling(hw); // chamadas de sistema
 			hw.cpu.setAddressOfHandlers(ih, sc);
-			utils = new Utilities(hw);
+			utils = new Utilities(hw, _readyToExecute);
 			this.tamPage = tamPage;
 			this.processManager =  new ProcessManager();
-			this.scheduler = new Scheduler(1);
+			this.scheduler = new Scheduler(1, readyToExecute, readyCPU, finishedCPU);
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -679,11 +700,16 @@ public class Sistema {
 	public SO so;
 	public Programs progs;
 	public MemoryMananger memoryMananger;
+	public Semaphore readyCPU, finishedCPU, readyToExecute;
 
 	public Sistema(int tamMem, int tamPage) {
-		hw = new HW(tamMem); // memoria do HW tem tamMem palavras
-		so = new SO(hw, tamPage);
-		memoryMananger = new MemoryMananger();
+		readyCPU = new Semaphore(0);
+		finishedCPU = new Semaphore(0);
+		readyToExecute = new Semaphore(0);
+
+		hw = new HW(tamMem, readyCPU, finishedCPU); // memoria do HW tem tamMem palavras
+		so = new SO(hw, tamPage, readyToExecute, finishedCPU, readyCPU); // cria sistema operacional
+		memoryMananger = new MemoryMananger(); // cria gerenciador de memória
 		hw.cpu.setUtilities(so.utils); // permite cpu fazer dump de memoria ao avancar
 		progs = new Programs();
 	}
@@ -890,6 +916,10 @@ public class Sistema {
 			return true;
 		}
 
+		public boolean readyQueueIsEmpty(){
+			return this.readyQueue.isEmpty();
+		}
+
 		/**
 		 * Traduz um endereço lógico para físico com base na posição lógica (considera o processo rodando pois trabalha com suas páginas)
 		 * @param logicalPosition endereço lógico
@@ -1049,11 +1079,15 @@ public class Sistema {
 	}
 
 
-	public class Scheduler {
+	public class Scheduler implements Runnable{
 		private long maxTime;
+		private Semaphore readyToExecute, readyCPU, finishedCPU;
 			
-		public Scheduler(long maxTime) {
+		public Scheduler(long maxTime, Semaphore _readyToExecute, Semaphore _readyCPU, Semaphore _finishedCPU) {
 			this.maxTime = maxTime;
+			this.readyToExecute = _readyToExecute;
+			this.readyCPU = _readyCPU;
+			this.finishedCPU = _finishedCPU;
 		}
 
 		/**
@@ -1071,31 +1105,27 @@ public class Sistema {
 				so.processManager.readyQueue.add(so.processManager.running);
 			}
 			
-			if(so.processManager.readyQueue.size() > 0){
-				if(pcb != null){
-					int i = 0;
-					for (ProcessManager.ProcessControlBlock process : so.processManager.readyQueue) {
-						if (pcb.id.equals(process.id)) {
-							so.processManager.running =	pcb;
-							so.processManager.readyQueue.remove(i);
-						}
-						i++;
+			if(pcb != null){
+				int i = 0;
+				for (ProcessManager.ProcessControlBlock process : so.processManager.readyQueue) {
+					if (pcb.id.equals(process.id)) {
+						so.processManager.running =	pcb;
+						so.processManager.readyQueue.remove(i);
 					}
-				} else {
-					so.processManager.running = so.processManager.readyQueue.poll();
+					i++;
 				}
-				
-				// Carrega seu último estado
-				so.processManager.running.record.loadRecord();
-				// setar o startTime curretnTime
-				so.processManager.running.startTime = System.currentTimeMillis(); 
-				// seta o status como rodando
-				so.processManager.running.setStatus(ProcessStatus.EXECUTANDO);	
-				// setContext cpu
-				hw.cpu.setContext(so.processManager.running.pc);	
-			} else{
-				so.processManager.running = null;	
-			}	
+			} else {
+				so.processManager.running = so.processManager.readyQueue.poll();
+			}
+			
+			// Carrega seu último estado
+			so.processManager.running.record.loadRecord();
+			// setar o startTime curretnTime
+			so.processManager.running.startTime = System.currentTimeMillis(); 
+			// seta o status como rodando
+			so.processManager.running.setStatus(ProcessStatus.EXECUTANDO);	
+			// setContext cpu
+			hw.cpu.setContext(so.processManager.running.pc);		
 		}
 
 		public boolean checkTimerInterrupt(){
@@ -1106,6 +1136,28 @@ public class Sistema {
 			}
 			
 			return false;
+		}
+
+		@Override
+		public void run(){
+			while(true){
+				try {
+					// Espera o sinal para liberar a CPU rodar (semáforo)
+					readyToExecute.acquire();
+					// Enquanto tiver processos na fila de prontos
+					while (!so.processManager.readyQueueIsEmpty()){
+						// Retira o processo da CPU e executa o próximo da fila de prontos
+						so.scheduler.runningNext(null);
+						System.out.println(so.processManager.running.id + " is running");
+						// Libera a CPU para rodar
+						readyCPU.release();
+						// Espera o sinal de finalização da CPU
+						finishedCPU.acquire();
+					}
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				}
+			}
 		}
 	}
 
@@ -1127,8 +1179,13 @@ public class Sistema {
 		// 	System.out.println("-------------------- " + p.name);
 		// 	so.utils.loadAndExec(p.image);
 		// }
-		UserShell shell = new UserShell(hw.cpu.u);
-		shell.run();
+		Thread cpu = new Thread(hw.cpu);
+		Thread scheduler = new Thread(so.scheduler);
+		Thread user = new Thread(new UserShell(hw.cpu.u));
+
+		cpu.start();
+		scheduler.start();
+		user.start();
 		
 	
 		// so.utils.loadAndExec(progs.retrieveProgram("fatorial"));

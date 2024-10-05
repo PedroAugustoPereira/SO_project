@@ -1,12 +1,13 @@
 import java.util.Scanner;
 
-public class UserShell {
+public class UserShell implements Runnable{
     private Sistema.Utilities utilities;
 
     public UserShell(Sistema.Utilities utilities) {
         this.utilities = utilities;
     }
 
+    @Override
     public void run() {
         Scanner scanner = new Scanner(System.in);
         while (true) {
