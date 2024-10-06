@@ -21,8 +21,9 @@ public class UserShell implements Runnable{
 
         String[] parts = getPartsOfString(command);
 
-        if(parts == null){
+        if(parts[0] == null){
             System.out.println("Comando inválido.");
+            return;
         }
 
         String mainCommand = parts[0];
