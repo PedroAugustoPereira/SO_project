@@ -19,8 +19,11 @@
 //           Isto representa programas armazenados.
 //    Veja o main.  Ele instancia o Sistema com os elementos mencionados acima.
 //           em seguida solicita a execução de algum programa com  loadAndExec
-
+import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.util.*;
+import java.util.concurrent.Semaphore;
 
 public class Sistema {
 
@@ -34,8 +37,10 @@ public class Sistema {
 
 	public class Memory {
 		public Word[] pos; // pos[i] é a posição i da memória. cada posição é uma palavra.
+		public int tamMem;
 
 		public Memory(int size) {
+			this.tamMem = size;
 			pos = new Word[size];
 			for (int i = 0; i < pos.length; i++) {
 				pos[i] = new Word(Opcode.___, -1, -1, -1);
@@ -55,6 +60,10 @@ public class Sistema {
 			ra = _ra;
 			rb = _rb;
 			p = _p;
+		}
+
+		public String toString(){
+			return "opc: " + this.opc + " ra: " + this.ra + " rb: " + this.rb + " p: " + this.p;
 		}
 	}
 
@@ -76,9 +85,10 @@ public class Sistema {
 		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow, intSTOP;
 	}
 
-	public class CPU {
+	public class CPU implements Runnable{
 		private int maxInt; // valores maximo e minimo para inteiros nesta cpu
 		private int minInt;
+
 		// CONTEXTO da CPU ...
 		private int pc; // ... composto de program counter,
 		private Word ir; // instruction register,
@@ -89,25 +99,25 @@ public class Sistema {
 		// nas proximas versoes isto pode modificar
 
 		private Word[] m; // m é o array de memória "física", CPU tem uma ref a m para acessar
-
 		private InterruptHandling ih; // significa desvio para rotinas de tratamento de Int - se int ligada, desvia
 		private SysCallHandling sysCall; // significa desvio para tratamento de chamadas de sistema
-
-		private boolean cpuStop; // flag para parar CPU - caso de interrupcao e stop - nesta versao acaba o
-									// sistema no fim do prog
+		private boolean cpuStop; // flag para parar CPU - caso de interrupcao e stop - nesta versao acaba o sistema no fim do prog
 
 		// auxilio aa depuração
 		private boolean debug; // se true entao mostra cada instrucao em execucao
 		private Utilities u; // para debug (dump)
 
-		public CPU(Memory _mem, boolean _debug) { // ref a MEMORIA e interrupt handler passada na criacao da CPU
+		private Semaphore readyCPU, finishedCPU;
+
+		public CPU(Memory _mem, boolean _debug, Semaphore _readyCPU, Semaphore _finishedCPU) { // ref a MEMORIA e interrupt handler passada na criacao da CPU
 			maxInt = 32767; // capacidade de representacao modelada
 			minInt = -32767; // se exceder deve gerar interrupcao de overflow
 			m = _mem.pos; // usa o atributo 'm' para acessar a memoria, só para ficar mais pratico
 			reg = new int[10]; // aloca o espaço dos registradores - regs 8 e 9 usados somente para IO
+			readyCPU = _readyCPU;
+			finishedCPU = _finishedCPU;
 
 			debug = _debug; // se true, print da instrucao em execucao
-
 		}
 
 		public void setUtilities(Utilities _u) {
@@ -121,7 +131,12 @@ public class Sistema {
 
 		private boolean legal(int e) { // todo acesso a memoria tem que ser verificado
 			if (e >= 0 && e < m.length) {
-				return true;
+				boolean addrValido = e < so.processManager.running.pages.size() * so.tamPage;
+				if (!addrValido) {
+					System.out.println("Endereço lógico inválido: " + e + "\nProccesso: " + so.processManager.running.name + "\n id: " +so.processManager.running.id);
+					irpt = Interrupts.intEnderecoInvalido;
+				}
+				return addrValido;
 			} else {
 				irpt = Interrupts.intEnderecoInvalido;
 				return false;
@@ -142,13 +157,16 @@ public class Sistema {
 			irpt = Interrupts.noInterrupt; // reset da interrupcao registrada
 		}
 
-		public void run() { // execucao da CPU supoe que o contexto da CPU, vide acima, esta devidamente
-							// setado
+		public void run(boolean useScheduler) { // execucao da CPU supoe que o contexto da CPU, vide acima, esta devidamente
+							// setado					
 			cpuStop = false;
 			while (!cpuStop) { // ciclo de instrucoes. acaba cfe instrucao, veja cada caso.
 				// --------------------------------------------------------------------------------------------------
 				// FETCH
+				pc = so.processManager.running.pc;
 				if (legal(pc)) { // pc valido
+					pc = so.processManager.translateProgramCounter(so.processManager.running.pc);
+
 					ir = m[pc]; // <<<<<<<<<<<< busca posicao da memoria apontada por pc, guarda em ir
 					if (debug) {
 						System.out.print("                                                  regs: ");
@@ -162,7 +180,7 @@ public class Sistema {
 						System.out.print("                               pc: " + pc + "       exec: ");
 						u.dump(ir);
 					}
-
+					
 					// --------------------------------------------------------------------------------------------------
 					// EXECUTA INSTRUCAO NO ir
 					switch (ir.opc) { // conforme o opcode (código de operação) executa
@@ -170,141 +188,179 @@ public class Sistema {
 						// Instrucoes de Busca e Armazenamento em Memoria
 						case LDI: // Rd ← k
 							reg[ir.ra] = ir.p;
+							so.processManager.running.incLogicProgramCounter();
 							pc++;
 							break;
 						case LDD: // Rd <- [A]
 							if (legal(ir.p)) {
 								reg[ir.ra] = m[ir.p].p;
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case LDX: // RD <- [RS] // NOVA
 							if (legal(reg[ir.rb])) {
 								reg[ir.ra] = m[reg[ir.rb]].p;
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case STD: // [A] ← Rs
 							if (legal(ir.p)) {
-								m[ir.p].opc = Opcode.DATA;
-								m[ir.p].p = reg[ir.ra];
+								int address = so.processManager.translateProgramCounter(ir.p);
+								if(address != -1) {
+									m[address].opc = Opcode.DATA;
+									m[address].p = reg[ir.ra];
+								}
+								
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							;
 							break;
 						case STX: // [Rd] ←Rs
 							if (legal(reg[ir.ra])) {
-								m[reg[ir.ra]].opc = Opcode.DATA;
-								m[reg[ir.ra]].p = reg[ir.rb];
+								int address = so.processManager.translateProgramCounter(reg[ir.ra]);
+								m[address].opc = Opcode.DATA;
+								m[address].p = reg[ir.rb];
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							;
 							break;
 						case MOVE: // RD <- RS
 							reg[ir.ra] = reg[ir.rb];
+							so.processManager.running.incLogicProgramCounter();
 							pc++;
 							break;
 						// Instrucoes Aritmeticas
 						case ADD: // Rd ← Rd + Rs
 							reg[ir.ra] = reg[ir.ra] + reg[ir.rb];
 							testOverflow(reg[ir.ra]);
+							so.processManager.running.incLogicProgramCounter();
 							pc++;
 							break;
 						case ADDI: // Rd ← Rd + k
 							reg[ir.ra] = reg[ir.ra] + ir.p;
 							testOverflow(reg[ir.ra]);
+							so.processManager.running.incLogicProgramCounter();
 							pc++;
 							break;
 						case SUB: // Rd ← Rd - Rs
 							reg[ir.ra] = reg[ir.ra] - reg[ir.rb];
 							testOverflow(reg[ir.ra]);
+							so.processManager.running.incLogicProgramCounter();
 							pc++;
 							break;
 						case SUBI: // RD <- RD - k // NOVA
 							reg[ir.ra] = reg[ir.ra] - ir.p;
 							testOverflow(reg[ir.ra]);
+							so.processManager.running.incLogicProgramCounter();
 							pc++;
 							break;
 						case MULT: // Rd <- Rd * Rs
 							reg[ir.ra] = reg[ir.ra] * reg[ir.rb];
 							testOverflow(reg[ir.ra]);
+							so.processManager.running.incLogicProgramCounter();
 							pc++;
 							break;
 
 						// Instrucoes JUMP
 						case JMP: // PC <- k
+							so.processManager.running.setPc(ir.p);
 							pc = ir.p;
 							break;
 						case JMPIM: // PC <- [A]
+							so.processManager.running.setPc(m[ir.p].p);
 							pc = m[ir.p].p;
 							break;
 						case JMPIG: // If Rc > 0 Then PC ← Rs Else PC ← PC +1
 							if (reg[ir.rb] > 0) {
+								so.processManager.running.setPc(reg[ir.ra]);
 								pc = reg[ir.ra];
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPIGK: // If RC > 0 then PC <- k else PC++
 							if (reg[ir.rb] > 0) {
+								so.processManager.running.setPc(ir.p);
 								pc = ir.p;
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPILK: // If RC < 0 then PC <- k else PC++
 							if (reg[ir.rb] < 0) {
+								so.processManager.running.setPc(ir.p);
 								pc = ir.p;
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPIEK: // If RC = 0 then PC <- k else PC++
 							if (reg[ir.rb] == 0) {
+								so.processManager.running.setPc(ir.p);
 								pc = ir.p;
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPIL: // if Rc < 0 then PC <- Rs Else PC <- PC +1
 							if (reg[ir.rb] < 0) {
+								so.processManager.running.setPc(reg[ir.ra]);
 								pc = reg[ir.ra];
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPIE: // If Rc = 0 Then PC <- Rs Else PC <- PC +1
 							if (reg[ir.rb] == 0) {
+								so.processManager.running.setPc(reg[ir.ra]);
 								pc = reg[ir.ra];
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPIGM: // If RC > 0 then PC <- [A] else PC++
 							if (reg[ir.rb] > 0) {
+								so.processManager.running.setPc(m[ir.p].p);
 								pc = m[ir.p].p;
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPILM: // If RC < 0 then PC <- k else PC++
 							if (reg[ir.rb] < 0) {
+								so.processManager.running.setPc(m[ir.p].p);
 								pc = m[ir.p].p;
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPIEM: // If RC = 0 then PC <- k else PC++
 							if (reg[ir.rb] == 0) {
+								so.processManager.running.setPc(m[ir.p].p);
 								pc = m[ir.p].p;
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
 						case JMPIGT: // If RS>RC then PC <- k else PC++
 							if (reg[ir.ra] > reg[ir.rb]) {
+								so.processManager.running.setPc(ir.p);
 								pc = ir.p;
 							} else {
+								so.processManager.running.incLogicProgramCounter();
 								pc++;
 							}
 							break;
@@ -317,12 +373,23 @@ public class Sistema {
 						case SYSCALL:
 							sysCall.handle(); // <<<<< aqui desvia para rotina de chamada de sistema, no momento so
 												// temos IO
+							
+							so.processManager.running.incLogicProgramCounter();
 							pc++;
 							break;
 
 						case STOP: // por enquanto, para execucao
 							sysCall.stop();
-							cpuStop = true;
+							System.out.println("1 processo finalizado: \nNome:" +so.processManager.running.name + "\n" + "ID: " +so.processManager.running.id + "\n");
+							System.out.println("Final Dump: ");
+							u.dump(so.processManager.running.id);
+							so.processManager.dieProcess(so.processManager.running.id);
+							so.processManager.running = null;
+
+							if(so.processManager.readyQueue.size() > 0 && useScheduler)
+								so.scheduler.runningNext(null);
+							else
+								cpuStop = true;
 							break;
 
 						// Inexistente
@@ -335,9 +402,40 @@ public class Sistema {
 				// VERIFICA INTERRUPÇÃO !!! - TERCEIRA FASE DO CICLO DE INSTRUÇÕES
 				if (irpt != Interrupts.noInterrupt) { // existe interrupção
 					ih.handle(irpt); // desvia para rotina de tratamento
-					cpuStop = true; // nesta versao, para a CPU
+					
+					if(so.processManager.readyQueue.size() > 0 && useScheduler)
+						so.scheduler.runningNext(null);
+					else
+						cpuStop = true;
+				}
+
+				if(so.scheduler.checkTimerInterrupt() && useScheduler){
+					so.scheduler.runningNext(null);
 				}
 			} // FIM DO CICLO DE UMA INSTRUÇÃO
+		}
+
+		@Override
+		public void run() {
+			while (true) {
+				try {
+					// CPU aguarda sinal para rodar (semáforo)
+					readyCPU.acquire();
+					
+					// Processo está rodando
+					System.out.println("CPU is running");
+					// Roda o processo na CPU (possui o timer de interrupção lá dentro)
+					hw.cpu.run(false);
+					// Processo finalizou ou foi interrompido, CPU livre
+					System.out.println("CPU is free");
+	
+					// Libera o semáforo para o escalonador (semáforo)
+					finishedCPU.release();
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				}
+				// Espera o sinal para liberar a CPU rodar (semáforo)
+			}
 		}
 	}
 	// ------------------ C P U - fim
@@ -350,9 +448,9 @@ public class Sistema {
 		public Memory mem;
 		public CPU cpu;
 
-		public HW(int tamMem) {
+		public HW(int tamMem, Semaphore readyCPU, Semaphore finishedCPU) {
 			mem = new Memory(tamMem);
-			cpu = new CPU(mem, true); // true liga debug
+			cpu = new CPU(mem, true, readyCPU, finishedCPU); // true liga debug
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -381,6 +479,15 @@ public class Sistema {
 			// apenas avisa - todas interrupcoes neste momento finalizam o programa
 			System.out.println(
 					"                                               Interrupcao " + irpt + "   pc: " + hw.cpu.pc);
+		
+			if(irpt == Interrupts.intEnderecoInvalido){
+				invalidAddress();	
+			}
+		}
+
+		public void invalidAddress(){
+			so.processManager.dieProcess(so.processManager.running.id);
+			so.processManager.running = null;		
 		}
 	}
 
@@ -400,6 +507,13 @@ public class Sistema {
 		public void handle() { // apenas avisa - todas interrupcoes neste momento finalizam o programa
 			System.out.println("                                               SYSCALL pars:  " + hw.cpu.reg[8] + " / "
 					+ hw.cpu.reg[9]);
+			// if(hw.cpu.reg[8] == 1){
+			// 	Scanner scanner = new Scanner(System.in);
+			// 	hw.cpu.reg[9] = scanner.nextInt();
+			// 	scanner.close();
+			// } else {
+			// 	System.out.println(hw.cpu.reg[9]);
+			// }
 		}
 	}
 
@@ -410,11 +524,13 @@ public class Sistema {
 	// carga na memória
 	public class Utilities {
 		private HW hw;
+		private Semaphore readyToExecute;
 
-		public Utilities(HW _hw) {
+		public Utilities(HW _hw, Semaphore _readyToExecute) {
 			hw = _hw;
+			readyToExecute = _readyToExecute;
 		}
-
+		
 		private void loadProgram(Word[] p) {
 			Word[] m = hw.mem.pos; // m[] é o array de posições memória do hw
 			for (int i = 0; i < p.length; i++) {
@@ -424,6 +540,8 @@ public class Sistema {
 				m[i].p = p[i].p;
 			}
 		}
+
+		
 
 		// dump da memória
 		public void dump(Word w) { // funcoes de DUMP nao existem em hardware - colocadas aqui para facilidade
@@ -447,15 +565,111 @@ public class Sistema {
 			}
 		}
 
-		private void loadAndExec(Word[] p) {
-			loadProgram(p); // carga do programa na memoria
-			System.out.println("---------------------------------- programa carregado na memoria");
-			dump(0, p.length); // dump da memoria nestas posicoes
-			hw.cpu.setContext(0); // seta pc para endereço 0 - ponto de entrada dos programas
-			System.out.println("---------------------------------- inicia execucao ");
-			hw.cpu.run(); // cpu roda programa ate parar
-			System.out.println("---------------------------------- memoria após execucao ");
-			dump(0, p.length); // dump da memoria com resultado
+		// private void loadAndExec(Word[] p) {
+		// 	loadProgram(p); // carga do programa na memoria
+		// 	System.out.println("---------------------------------- programa carregado na memoria");
+		// 	dump(0, p.length); // dump da memoria nestas posicoes
+		// 	hw.cpu.setContext(0); // seta pc para endereço 0 - ponto de entrada dos programas
+		// 	System.out.println("---------------------------------- inicia execucao ");
+		// 	hw.cpu.run(); // cpu roda programa ate parar
+		// 	System.out.println("---------------------------------- memoria após execucao ");
+		// 	dump(0, p.length); // dump da memoria com resultado
+		// }
+
+		//Deletar o processo, temos que verificar se está rodando ou não
+		public void rm(String id){
+			if(so.processManager.dieProcess(id)){
+				System.out.println("Processo removido");
+				return;
+			}
+
+			System.out.println("Processo não encontrado");
+		}
+
+		//Lista todos os processos
+		public void ps(){
+			System.out.println("=================================================================");
+			for(Sistema.ProcessManager.ProcessControlBlock pcb : so.processManager.allProcesses){
+				System.out.println(pcb.id + "\t->\t" + pcb.name + "\t" + pcb.status );
+			}
+			System.out.println("=================================================================");
+		}
+
+		public void dump(String id){
+			Sistema.ProcessManager.ProcessControlBlock pcb;
+			pcb = so.processManager.getProcessById(id);
+
+			if(pcb != null){
+				System.out.println("PCB:");
+				String pcbDump = pcb.toString();
+				System.out.println(pcbDump);
+				System.out.println("Memory:");
+				String dumpMem = "";
+				for(int i  = 0 ; i < pcb.pages.size() ; i++){
+					int frameIndex = pcb.pages.get(i) * so.tamPage;
+
+					for(int j = frameIndex ; j <  (frameIndex + so.tamPage); j++){
+						dumpMem += "["+  j  + "]" + " -> " + hw.mem.pos[j].toString() + "\n";
+					}	
+				}
+				System.out.println(dumpMem);
+				return;
+			}
+
+			System.out.println("Processo não encontrado");
+		}
+
+		public void dumpM(int start, int end){
+			if(start > end){
+				System.out.println("Parâmetros inválidos");
+				return;
+			}
+
+			for(int i = start; i < end ; i++){
+				System.out.println("["+  i  + "] -> " + hw.mem.pos[i].toString());
+			}
+		}
+
+		public void newProcess(String name){
+			for(Program programAux :  progs.progs){
+				if (programAux.name.equals(name)) {
+					String idProcess = so.processManager.createProgram(programAux, null);
+					if(idProcess != ""){
+						System.out.println("Processo criado -> ID: " + idProcess);
+						return;
+					}
+				}	
+			}
+
+			System.out.println("Erro ao criar processo");	
+		}
+
+		public void exec(String idProcess){
+			ProcessManager.ProcessControlBlock pcb = so.processManager.getProcessById(idProcess);
+			if(pcb == null){
+				System.out.println("Processo não enctrado");
+				return;
+			}
+			
+			System.out.println("Process is running");
+			so.scheduler.runningNext(pcb);
+			hw.cpu.run(false);
+		}
+
+		public void tradeOn(){
+			hw.cpu.debug = true;
+		}
+
+		public void tradeOff(){
+			hw.cpu.debug = false;	
+		}
+
+		public void execAll(){
+			// Informa que todos os processos da fila de prontos estão rodando
+			System.out.println("Executando todos os processos");
+
+			// Libera o escalonador para rodar todos os processos da fila de prontos
+			readyToExecute.release();
 		}
 	}
 
@@ -463,37 +677,517 @@ public class Sistema {
 		public InterruptHandling ih;
 		public SysCallHandling sc;
 		public Utilities utils;
+		public int tamPage;
+		public ProcessManager processManager;
+		public Scheduler scheduler;  
 
-		public SO(HW hw) {
+		public SO(HW hw, int tamPage, Semaphore _readyToExecute, Semaphore _finishedCPU, Semaphore _readyCPU) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
 			sc = new SysCallHandling(hw); // chamadas de sistema
 			hw.cpu.setAddressOfHandlers(ih, sc);
-			utils = new Utilities(hw);
+			utils = new Utilities(hw, _readyToExecute);
+			this.tamPage = tamPage;
+			this.processManager =  new ProcessManager();
+			this.scheduler = new Scheduler(1, readyToExecute, readyCPU, finishedCPU);
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
 	// ------------------- S I S T E M A
 	// --------------------------------------------------------------------
 
+	
 	public HW hw;
 	public SO so;
 	public Programs progs;
+	public MemoryMananger memoryMananger;
+	public Semaphore readyCPU, finishedCPU, readyToExecute;
 
-	public Sistema(int tamMem) {
-		hw = new HW(tamMem); // memoria do HW tem tamMem palavras
-		so = new SO(hw);
+	public Sistema(int tamMem, int tamPage) {
+		readyCPU = new Semaphore(0);
+		finishedCPU = new Semaphore(0);
+		readyToExecute = new Semaphore(0);
+
+		hw = new HW(tamMem, readyCPU, finishedCPU); // memoria do HW tem tamMem palavras
+		so = new SO(hw, tamPage, readyToExecute, finishedCPU, readyCPU); // cria sistema operacional
+		memoryMananger = new MemoryMananger(); // cria gerenciador de memória
 		hw.cpu.setUtilities(so.utils); // permite cpu fazer dump de memoria ao avancar
 		progs = new Programs();
 	}
 
-	public void run() {
-		for (Program p : progs.progs) {
-			System.out.println("################################################### ");
-			System.out.println("################################################### ");
-			System.out.println("-------------------- " + p.name);
-			so.utils.loadAndExec(p.image);
+	public class MemoryMananger{
+		public int numFrames;                   //número  de frames 
+		public boolean[] frameMemoryBlockUsed;  //Array que controla o uso de cada frame (By: Pedro - Pensei em criar para não ter que sempre percorrer toda a memória para encontrar um frame vago) 
+		
+		public MemoryMananger(){
+			this.numFrames = (hw.mem.tamMem / so.tamPage);          //cáculo para pegar o número de frames
+			this.frameMemoryBlockUsed = new boolean[this.numFrames];   //nosso array de frames usados com o tamanho de frames.	
 		}
 
+		/**
+		 * Método responsável por alocar um array de palavras em frames livre de memória
+		 * @param words array de palavras de um programa
+		 * @return mapeamento das páginas do programa com seus respectivos frames
+		 */
+		public ArrayList<Integer> alocProg(Word[] words){
+			// Pega a quantidade de páginas necessárias para alocar em frames
+			ArrayList<Word[]> pages = getPages(words);
+
+			// Pega os frames que estão livres
+			ArrayList<Integer> frames = getFrames(pages.size());
+
+			// Resposta com o mapeamento das páginas com os frames
+			ArrayList<Integer> mapFrames = new ArrayList<>();
+
+			// Valida se temos frames livres
+			if (frames != null){
+				// Percorre cada pagina do programa
+				for (int i = 0; i < pages.size(); i++){
+					// Aloca as palavras da pagina no frame livre
+					this.setWordsInFrame(frames.get(i), pages.get(i));
+					mapFrames.add(frames.get(i));
+				}
+			} else {
+				System.out.println("Não há frames disponíveis para alocar as páginas do programa.");
+			}
+
+			// Array com o mapeamento dos frames
+			return mapFrames;
+		}
+
+		/**
+		 * Método responsável desalocar o espaço reservado por um programa
+		 * @param mapFrames um ArrayList indicando o endereço lógico dos frames
+		 */
+		public void dealLocProg(ArrayList<Integer> mapFrames){
+			//Percorre o map de frames
+			for(int i = 0 ; i < mapFrames.size() ; i++){
+				//Pega o endereço físico do frame
+				int indexWord = mapFrames.get(i) * so.tamPage;
+
+				//Percorre todos os endereços reservados do frame a partiri do seu início
+				for(int j = indexWord ; j < (indexWord + so.tamPage) ; j++){
+					hw.mem.pos[j] = new Word(Opcode.___, -1, -1, -1); //desaloca os espaços do frame	
+				}
+
+				//Coloca a posição do frame como livre
+				this.frameMemoryBlockUsed[mapFrames.get(i)] = false;
+			}
+		}
+
+		/**
+		 * Método responsável por retornar a quantidade de páginas com suas palavras
+		 * @param words array de palavras que serão divididas em páginas
+		 * @return lista de páginas com palavras
+		 */
+		private ArrayList<Word[]> getPages(Word[] words){
+			// Pega tamanho do programa que solicitou lugar na memória
+			int tamProg = words.length;
+
+			// Calcula quantos frames serão necessários
+			int totalPages = new BigDecimal(tamProg)
+				.divide(new BigDecimal(so.tamPage), 0, RoundingMode.CEILING)
+				.round(new MathContext(0, RoundingMode.UP))
+				.intValue();
+
+			// Array com as paginas do programa
+			ArrayList<Word[]> pages = new ArrayList<>();
+
+			// Percorre o total de paginas do programa
+			for (int i = 0; i < totalPages ; i++){
+				// Aloca a posicao inicial da pagina
+				int indexWord = i * so.tamPage;
+				Word[] pageSlice = new Word[so.tamPage];
+
+				// A partir do comeco da pagina, percorre cada palavra
+				for (int j = 0 ; j < so.tamPage; j++){
+					// Se a posicao na palavra nao for nula, aloca a palavra no array
+					if ((indexWord < words.length) && (words[indexWord] != null)){
+						pageSlice[j] = words[indexWord];
+						indexWord++;
+					} else{
+						System.out.println("Não há mais palavras a serem alocadas na página.");
+						break;
+					}
+				}
+				// Coloca a pagina criada no array de paginas
+				pages.add(pageSlice);
+			}
+
+			// Retorna o array de paginas
+			return pages;
+		}
+
+		/**
+		 * Método responsável por pegar uma quantidade requisitada de frames livres em memória
+		 * @param pages quantidade de frames solicitados
+		 * @return array com o mapeamento de frames livres
+		 */
+		private ArrayList<Integer> getFrames(int pages){
+			// Conta a quantidade de páginas na response
+			int countPages = 0;
+			// Responsável por informar quais frames estão livres
+			ArrayList<Integer> frames = new ArrayList<>();
+
+			// Percorre o array de status dos frames
+			for (int i = 0; i < this.frameMemoryBlockUsed.length; i++) {
+				// Valida se temos frames disponíveis para o programa
+				if (countPages == pages){
+					return frames;
+				}
+
+				// Adiciona o index do frame na resposta
+				if (this.frameMemoryBlockUsed[i] == false){
+					this.frameMemoryBlockUsed[i] = true;
+					frames.add(i);
+					countPages++;
+				}
+			}
+			// Caso não encontre frames suficientes, retorna nulo 
+			return null;
+		}
+
+		/**
+		 * Método responsável por alocar as palavras no frame em memória
+		 * @param indexFrame index do frame livre
+		 * @param words array de palavras que será alocado
+		 */
+		private void setWordsInFrame(int indexFrame, Word[] words){
+			// Pega o endereço inicial do frame em memória
+			int memPos = indexFrame * so.tamPage;
+
+			// Percorre o array de palavras e aloca no frame
+			for (int i = 0; i < words.length; i++){
+				if(words[i] != null)
+					hw.mem.pos[memPos + i] = words[i];
+			}
+		}
+	}
+
+	public class ProcessManager{
+		public Queue<ProcessControlBlock> readyQueue;		//FILA com todos os processos prontos
+		private List<ProcessControlBlock> allProcesses;     //Lista com todos os processos
+		public ProcessControlBlock running;                 //Ponteiro para o processo que está rodando (importante para o SO)
+
+		public ProcessManager(){
+			this.readyQueue = new LinkedList<>();
+			this.allProcesses = new LinkedList<>();
+			running = null;
+		}
+
+		/**
+		 * Cria um programa alocando sua memória e criando toda sua estrutura
+		 * @param prog - Programa a ser criado
+		 * @param parent - Processo criador do programa (pode ser nulo)
+		 * @return booleano de confirmação
+		 */
+		public String createProgram(Program prog, ProcessControlBlock parent){
+			ProcessControlBlock pcb = new ProcessControlBlock(prog.name, parent);
+			ArrayList<Integer> pages = memoryMananger.alocProg(prog.image);   //Criação da lista de páginas do processo
+
+			//Validação se há memória suficiente
+			if(pages == null){
+				return "";
+			}
+
+			pcb.setPages(pages);                    //seta as páginas para o processo
+			pcb.setStatus(ProcessStatus.PRONTO);	//seta o estado do processo
+			this.allProcesses.add(pcb);             //adiciona o processo na lista de todos os processos
+			this.readyQueue.add(pcb);               //adiciona na lista de prontos
+
+			return pcb.id;
+		}
+
+		/**
+		 * Destori todo o registro do processo em memória
+		 * @param id - id do processo
+		 */
+		public boolean dieProcess(String id){
+			ProcessControlBlock pcb = this.getProcessById(id);  //busca o processo na lsita de todos
+
+			if(pcb != null){
+				memoryMananger.dealLocProg(pcb.pages);           //desaloca a memória
+				allProcesses.removeIf(pcbAux -> pcb.id == pcbAux.id);   //remove de todos
+    			readyQueue.removeIf(pcbAux -> pcb.id == pcbAux.id);	 //remove dos prontos, caso esteja
+			} else {
+				return false;
+			}
+			
+			
+			return true;
+		}
+
+		public boolean readyQueueIsEmpty(){
+			return this.readyQueue.isEmpty();
+		}
+
+		/**
+		 * Traduz um endereço lógico para físico com base na posição lógica (considera o processo rodando pois trabalha com suas páginas)
+		 * @param logicalPosition endereço lógico
+		 * @return endereço físico da posição
+		 */
+		public int translateProgramCounter(int logicalPosition){
+			try{
+				int page = (int) Math.floor(logicalPosition / so.tamPage);
+
+				int pageAdress = this.running.pages.get(page) * so.tamPage;
+				int offset = logicalPosition - (page * so.tamPage);
+
+				return pageAdress + offset;
+			} catch(Exception e){
+				System.out.println(e);
+			}
+			
+			return -1;
+		}
+
+		/**
+		 * Recupera o pcb com base no id
+		 * @param id  - id do processo
+		 * @return
+		 */
+		public ProcessControlBlock getProcessById(String id) {
+			// Busca o PCB com o ID especificado
+			for(ProcessControlBlock pcbAux : this.allProcesses){
+				if(pcbAux.id.equals(id.trim())){
+					return pcbAux;
+				}
+			}
+			return null;
+		}
+
+		
+		//Classe aninhada para o PCB
+		public class ProcessControlBlock{
+			public String id;                      //id do processo
+			public int pc;                      //program counter
+			public String name;                 //nome do programa
+			public ProcessControlBlock parent;  //processo pai (se houver)
+			public ArrayList<Integer> pages;    //mapa de frames (paginas)
+			public ProcessStatus status;        //status atual do processo
+			public Record record;               //Último estado da cpu
+			public long startTime;            //tempo em que entrou na cpu
+
+			public ProcessControlBlock(String name, ProcessControlBlock parent){
+				this.parent = parent;
+				this.name = name;
+				this.status = ProcessStatus.NOVO;
+				this.id = this.generateUniqueRandomId();
+				this.pc = 0;
+				this.record = new Record();			
+			}
+
+			/**
+			 * Seta as páginas do processo
+			 * @param pages mapa com paginas e frames do processo
+			 */
+			public void setPages(ArrayList<Integer> pages) {
+				this.pages = pages;
+			}
+
+			/**
+			 * Seta o novo status do processo
+			 * @param status
+			 */
+			public void setStatus(ProcessStatus status) {
+				this.status = status;
+			}
+
+
+			public void setStartTime(long startTime) {
+				this.startTime = startTime;
+			}
+
+			/**
+			 * Gera um id único para o processo
+			 * @return inteiro para ser usado como id do processo
+			 */
+			private String generateUniqueRandomId() {
+				Random random = new Random();
+				Integer newId;
+				boolean isValid = true;
+				do{
+					newId = random.nextInt(Integer.MAX_VALUE);;
+					// Continua gerando até encontrar um ID que não foi usado
+
+					for (ProcessControlBlock pcb : allProcesses) {
+						if (pcb.id.toString() == newId.toString()) {
+							isValid = false;; // Encontra o maior ID existente
+						}
+					}
+				}while(!isValid);
+				
+				return newId.toString(); // Retorna o novo ID único
+			}
+
+			/**
+			 * Incremenda o contador lógico do processo
+			 * @return inteiro para ser usado como id do processo
+			 */
+			public void incLogicProgramCounter(){
+				this.pc++;
+			}
+
+
+			public String toString(){
+				String result = this.id + " ->\t " + this.name + "\t" + this.pages + "\t" + this.status + "\t" + this.startTime;
+				return result;
+			}
+
+			/**
+			 * Seta o contador lógico do processo para um valor específico
+			 * @param pc
+			 */
+			public void setPc(int pc) {
+				this.pc = pc;
+			}
+
+			//Classe aninhado para salvar o estado do processo na cpu
+			public class Record{
+				public int[] reg;   //Cópia dos registradores da cpu
+				public int pc;      //Cópia para pc da CPU
+				private Word ir;    //Cópia IR CPU
+
+				public Record(){
+					this.pc = 0;
+					this.reg = new int[]{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+					this.ir = null;
+				}
+
+				/**
+				 * Salva o estado da cpu na ultima execução do processo
+				 */
+				public void saveRecord(){
+					this.pc = hw.cpu.pc;
+					for(int i = 0 ; i < hw.cpu.reg.length ; i++){
+						this.reg[i] = hw.cpu.reg[i];
+					}
+					this.ir = hw.cpu.ir;
+				}
+
+				/**
+				 * Carrega a cpu com o último estado do processo
+				 */
+				public void loadRecord(){
+					hw.cpu.pc = this.pc;
+					for(int i = 0 ; i < hw.cpu.reg.length ; i++){
+						hw.cpu.reg[i]  = this.reg[i];
+					}
+					hw.cpu.ir = this.ir;	
+				}
+			}
+		}	
+	}
+
+
+	public class Scheduler implements Runnable{
+		private long maxTime;
+		private Semaphore readyToExecute, readyCPU, finishedCPU;
+			
+		public Scheduler(long maxTime, Semaphore _readyToExecute, Semaphore _readyCPU, Semaphore _finishedCPU) {
+			this.maxTime = maxTime;
+			this.readyToExecute = _readyToExecute;
+			this.readyCPU = _readyCPU;
+			this.finishedCPU = _finishedCPU;
+		}
+
+		/**
+		 * Coloca o próximo processo pra rodar (nesse caso eu simplesmente coloquei o proximo da fila e não fiz nada com o antigo), temos que tratar, se o antigo não acabou, vai pro final da fila, se acabou, temos que dar um die
+		 * @param id  - id do processo
+		 * @return
+		 */
+		public void runningNext(ProcessManager.ProcessControlBlock pcb) {
+			if(so.processManager.running != null){
+				// salva o estado do atual (DENTRO DO PCB)
+				so.processManager.running.record.saveRecord();
+				// atualiza o status do processo (PRONTO)
+				so.processManager.running.setStatus(ProcessStatus.PRONTO);
+				// Coloca o processo que estava RUNNING na fila de prontos
+				so.processManager.readyQueue.add(so.processManager.running);
+			}
+			
+			if(pcb != null){
+				int i = 0;
+				for (ProcessManager.ProcessControlBlock process : so.processManager.readyQueue) {
+					if (pcb.id.equals(process.id)) {
+						so.processManager.running =	pcb;
+						so.processManager.readyQueue.remove(i);
+					}
+					i++;
+				}
+			} else {
+				so.processManager.running = so.processManager.readyQueue.poll();
+			}
+			
+			// Carrega seu último estado
+			so.processManager.running.record.loadRecord();
+			// setar o startTime curretnTime
+			so.processManager.running.startTime = System.currentTimeMillis(); 
+			// seta o status como rodando
+			so.processManager.running.setStatus(ProcessStatus.EXECUTANDO);	
+			// setContext cpu
+			hw.cpu.setContext(so.processManager.running.pc);		
+		}
+
+		public boolean checkTimerInterrupt(){
+			if(so.processManager.running != null){
+				if(((System.currentTimeMillis() - so.processManager.running.startTime) * 100) >= maxTime){
+					return true;
+				}
+			}
+			
+			return false;
+		}
+
+		@Override
+		public void run(){
+			while(true){
+				try {
+					// Espera o sinal para liberar a CPU rodar (semáforo)
+					readyToExecute.acquire();
+					// Enquanto tiver processos na fila de prontos
+					while (!so.processManager.readyQueueIsEmpty()){
+						// Retira o processo da CPU e executa o próximo da fila de prontos
+						so.scheduler.runningNext(null);
+						System.out.println(so.processManager.running.id + " is running");
+						// Libera a CPU para rodar
+						readyCPU.release();
+						// Espera o sinal de finalização da CPU
+						finishedCPU.acquire();
+					}
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				}
+			}
+		}
+	}
+
+
+
+
+	public enum ProcessStatus {
+		NOVO,          // O processo foi criado, mas ainda não está em execução.
+		PRONTO,        // O processo está pronto para ser executado e aguardando a CPU.
+		EXECUTANDO,    // O processo está atualmente em execução.
+		BLOQUEADO,     // O processo está bloqueado, aguardando algum evento (ex.: I/O).
+		FINALIZADO;    // O processo terminou sua execução.
+	}
+
+	public void run() {
+		// for (Program p : progs.progs) {
+		// 	System.out.println("################################################### ");
+		// 	System.out.println("################################################### ");
+		// 	System.out.println("-------------------- " + p.name);
+		// 	so.utils.loadAndExec(p.image);
+		// }
+		Thread cpu = new Thread(hw.cpu);
+		Thread scheduler = new Thread(so.scheduler);
+		Thread user = new Thread(new UserShell(hw.cpu.u));
+
+		cpu.start();
+		scheduler.start();
+		user.start();
+		
+	
 		// so.utils.loadAndExec(progs.retrieveProgram("fatorial"));
 		// fibonacci10,
 		// fibonacci10v2,
@@ -510,7 +1204,7 @@ public class Sistema {
 	// -------------------------------------------------------------------------------------------------------
 	// ------------------- instancia e testa sistema
 	public static void main(String args[]) {
-		Sistema s = new Sistema(1024);
+		Sistema s = new Sistema(1024, 8);
 		s.run();
 	}
 
