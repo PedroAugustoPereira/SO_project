@@ -491,6 +491,35 @@ public class Sistema {
 		}
 	}
 
+	public class IOManager {
+
+		public class RequestIO {
+			public String pid;
+			public String type;
+			public int address;
+
+			public RequestIO(String pid, String type, int address) {
+				this.pid = pid;
+				this.type = type;
+				this.address = address;
+			}
+		}
+
+		private Queue<ProcessManager.ProcessControlBlock> blockedQueue;
+		private Queue<RequestIO> requestIOQueue;
+
+		public IOManager() {
+			blockedQueue = new LinkedList<>();
+			requestIOQueue = new LinkedList<>();
+		}
+
+		public void addRequestIO(ProcessManager.ProcessControlBlock pcb, String type, int address) {
+			
+			requestIOQueue.add(new RequestIO(pcb.id, type, address));
+
+		}
+	}
+
 	// ------------------- C H A M A D A S D E S I S T E M A - rotinas de tratamento
 	// ----------------------
 	public class SysCallHandling {
@@ -507,13 +536,15 @@ public class Sistema {
 		public void handle() { // apenas avisa - todas interrupcoes neste momento finalizam o programa
 			System.out.println("                                               SYSCALL pars:  " + hw.cpu.reg[8] + " / "
 					+ hw.cpu.reg[9]);
-			// if(hw.cpu.reg[8] == 1){
-			// 	Scanner scanner = new Scanner(System.in);
-			// 	hw.cpu.reg[9] = scanner.nextInt();
-			// 	scanner.close();
-			// } else {
-			// 	System.out.println(hw.cpu.reg[9]);
-			// }
+			// salva o estado do processo
+			so.processManager.running.record.saveRecord();
+
+			// bota na fila de bloqueados e cria o pedido de IO
+			if(hw.cpu.reg[8] == 1){
+				so.ioManager.addRequestIO(so.processManager.running, "IN", hw.cpu.reg[9]);
+			} else {
+				so.ioManager.addRequestIO(so.processManager.running, "OUT", hw.cpu.reg[9]);
+			}
 		}
 	}
 
@@ -679,7 +710,8 @@ public class Sistema {
 		public Utilities utils;
 		public int tamPage;
 		public ProcessManager processManager;
-		public Scheduler scheduler;  
+		public Scheduler scheduler;
+		public IOManager ioManager;
 
 		public SO(HW hw, int tamPage, Semaphore _readyToExecute, Semaphore _finishedCPU, Semaphore _readyCPU) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
@@ -689,6 +721,7 @@ public class Sistema {
 			this.tamPage = tamPage;
 			this.processManager =  new ProcessManager();
 			this.scheduler = new Scheduler(1, readyToExecute, readyCPU, finishedCPU);
+			this.ioManager = new IOManager();
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
