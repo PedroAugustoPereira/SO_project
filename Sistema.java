@@ -82,7 +82,7 @@ public class Sistema {
 	}
 
 	public enum Interrupts { // possiveis interrupcoes que esta CPU gera
-		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow, intSTOP;
+		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow, intSTOP, intIORequestIsReady;
 	}
 
 	public class CPU implements Runnable{
@@ -107,7 +107,7 @@ public class Sistema {
 		private boolean debug; // se true entao mostra cada instrucao em execucao
 		private Utilities u; // para debug (dump)
 
-		private Semaphore readyCPU, finishedCPU;
+		private Semaphore readyCPU, finishedCPU, readyQueue, blockedIOQueue;
 
 		public CPU(Memory _mem, boolean _debug, Semaphore _readyCPU, Semaphore _finishedCPU) { // ref a MEMORIA e interrupt handler passada na criacao da CPU
 			maxInt = 32767; // capacidade de representacao modelada
@@ -477,26 +477,29 @@ public class Sistema {
 
 		public void handle(Interrupts irpt) {
 			// apenas avisa - todas interrupcoes neste momento finalizam o programa
-			System.out.println(
-					"                                               Interrupcao " + irpt + "   pc: " + hw.cpu.pc);
-		
 			if(irpt == Interrupts.intEnderecoInvalido){
 				invalidAddress();	
+			}
+			else if(irpt == Interrupts.intIORequestIsReady){
+				//Trata a finalização da requisição
+				so.ioManager.onRequestIsReady();
 			}
 		}
 
 		public void invalidAddress(){
+			System.out.println(" Interrupcao por endereço inválido, pc: " + hw.cpu.pc);
 			so.processManager.dieProcess(so.processManager.running.id);
 			so.processManager.running = null;		
 		}
 	}
 
+	//Classe aninhada para requsições de IO
 	public class IOManager {
-
+		//Classe da requisição de IO
 		public class RequestIO {
-			public String pid;
-			public String type;
-			public int address;
+			public String pid;	//ID de processo
+			public String type; //Tipo de requisição, IN ou OUT
+			public int address; //Endereço de memória para outpuy, ou salvar input
 
 			public RequestIO(String pid, String type, int address) {
 				this.pid = pid;
@@ -505,7 +508,9 @@ public class Sistema {
 			}
 		}
 
+		//Fila de processos bloqueados por IO
 		private Queue<ProcessManager.ProcessControlBlock> blockedQueue;
+		//Fila de requisições de IO
 		private Queue<RequestIO> requestIOQueue;
 
 		public IOManager() {
@@ -513,12 +518,116 @@ public class Sistema {
 			requestIOQueue = new LinkedList<>();
 		}
 
+		/**
+		 * Adiciona uma nova requisição de IO
+		 * @param pcb processo que está fazendo a requisição
+		 * @param type tipo de requisição, IN ou OUT
+		 * @param address endereço de memória para output, ou salvar input
+		 */
 		public void addRequestIO(ProcessManager.ProcessControlBlock pcb, String type, int address) {
-			
 			requestIOQueue.add(new RequestIO(pcb.id, type, address));
+		}
 
+		/**
+		 * Adiciona um processo na fila de bloqueados por IO
+		 * @param pcb processo a ser bloqueado
+		 */
+		public void addBlockedProcess(ProcessManager.ProcessControlBlock pcb) {
+			blockedQueue.add(pcb);
+		}
+
+		/**
+		 * Método chamado quando a requisição de IO está pronta
+		 */
+		public void onRequestIsReady(){
+			//Pega o processo da fila de bloqueados
+			ProcessManager.ProcessControlBlock pcb = blockedQueue.poll();
+			//Passa ele para pronto e finaliza a requisição
+			so.processManager.readyQueue.add(pcb);
+			so.console.onEndRequest();
 		}
 	}
+
+	public class Console implements Runnable{
+		public IOManager.RequestIO currentRequest;       //Requisição atual a ser processada
+		private boolean pendingRequest;                  //Indica se a requisição atual está pendente (esperando input)
+		
+		@Override
+		public void run() {
+			this.currentRequest  = null;
+			this.pendingRequest = false;
+
+			//Looping olhando para a fila de processos bloqueados por IO
+			while(true){
+				//Se temos processo para pegar, e não tivermos um atual
+				if(currentRequest == null && so.ioManager.requestIOQueue.size() > 0 && !pendingRequest){
+					currentRequest = so.ioManager.requestIOQueue.poll();
+				}
+
+				//Processa a requisição atual
+				processRequest();
+			}
+		}
+
+		/**
+		 * Processa a requisição, (e a espera) enquanto houver
+		 */
+		private void processRequest(){
+			if(!this.pendingRequest && this.currentRequest != null){
+				if (currentRequest.type.equals("IN")) {
+					//Agora essa request está pendente, esperando o input
+					this.pendingRequest = true;        
+
+					//Se for input, devemos printar o nome do processo e que o mesmo está esperando um input
+					System.out.println("Processo " + currentRequest.pid + " esperando comando de input");
+					System.out.println("Template: in " +currentRequest.pid + " [Valor desejado] ");
+
+					//Nesse momento esperamos a Thread UserShell receber um comando para prosseguir
+				} else {
+					int value = hw.mem.pos[currentRequest.address].p;
+					outputCommand(value);
+				}
+			}
+		}
+
+		/**
+		 * Recebe um comando de input vindo do terminal e o guarda em memória
+		 * Cria a interrupção para ser tratada pela CPU
+		 * @param value valor inteiro recebido pelo terminal
+		 */
+		public void inputCommand(int pId, int value){
+			if (pendingRequest){
+				hw.mem.pos[currentRequest.address].p = value;
+				onCreateInterrupt();	
+			}
+		}
+
+		/**
+		 * Imprime o valor de output do processo
+		 * Cria a interrupção para ser tratada pela cpu
+		 * @param value valor de output
+		 */
+		public void outputCommand(int value){
+			System.out.println("Processo " + currentRequest.pid + "Output:" + value);
+			onCreateInterrupt();
+		}
+
+		/**
+		 * Gera a uma interrupção para CPU do tipo IOReady
+		 */
+		public void onCreateInterrupt(){
+			hw.cpu.irpt = Interrupts.intIORequestIsReady;
+		}
+
+		/**
+		 * Limpa variaveis de controle da requisição atual para tratar a próxima
+		 */
+		public void onEndRequest(){
+			this.currentRequest  = null;
+			this.pendingRequest  = false;
+		}
+	}
+
 
 	// ------------------- C H A M A D A S D E S I S T E M A - rotinas de tratamento
 	// ----------------------
@@ -533,18 +642,18 @@ public class Sistema {
 			System.out.println("                                               SYSCALL STOP");
 		}
 
-		public void handle() { // apenas avisa - todas interrupcoes neste momento finalizam o programa
-			System.out.println("                                               SYSCALL pars:  " + hw.cpu.reg[8] + " / "
-					+ hw.cpu.reg[9]);
+		public void handle() {
+			//Define o tipo de operação conforme o vaor do registrador
+			String typeIO = (hw.cpu.reg[8] == 1) ? "IN" : "OUT";
+
 			// salva o estado do processo
 			so.processManager.running.record.saveRecord();
 
-			// bota na fila de bloqueados e cria o pedido de IO
-			if(hw.cpu.reg[8] == 1){
-				so.ioManager.addRequestIO(so.processManager.running, "IN", hw.cpu.reg[9]);
-			} else {
-				so.ioManager.addRequestIO(so.processManager.running, "OUT", hw.cpu.reg[9]);
-			}
+			// Coloca o processo na fila de bloqueados por IO
+			so.ioManager.addBlockedProcess(so.processManager.running);
+
+			// Cria o request para o pedido de IO
+			so.ioManager.addRequestIO(so.processManager.running, typeIO, hw.cpu.reg[9]);
 		}
 	}
 
@@ -702,6 +811,10 @@ public class Sistema {
 			// Libera o escalonador para rodar todos os processos da fila de prontos
 			readyToExecute.release();
 		}
+
+		public void in(String pId, String value){
+			so.console.inputCommand(Integer.parseInt(pId), Integer.parseInt(value));
+		}
 	}
 
 	public class SO {
@@ -712,6 +825,7 @@ public class Sistema {
 		public ProcessManager processManager;
 		public Scheduler scheduler;
 		public IOManager ioManager;
+		public Console console;
 
 		public SO(HW hw, int tamPage, Semaphore _readyToExecute, Semaphore _finishedCPU, Semaphore _readyCPU) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
@@ -722,6 +836,7 @@ public class Sistema {
 			this.processManager =  new ProcessManager();
 			this.scheduler = new Scheduler(1, readyToExecute, readyCPU, finishedCPU);
 			this.ioManager = new IOManager();
+			this.console = new Console();
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
