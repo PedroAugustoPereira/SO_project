@@ -107,7 +107,7 @@ public class Sistema {
 		private boolean debug; // se true entao mostra cada instrucao em execucao
 		private Utilities u; // para debug (dump)
 
-		private Semaphore readyCPU, finishedCPU, readyQueue, blockedIOQueue;
+		private Semaphore readyCPU, finishedCPU;
 
 		public CPU(Memory _mem, boolean _debug, Semaphore _readyCPU, Semaphore _finishedCPU) { // ref a MEMORIA e interrupt handler passada na criacao da CPU
 			maxInt = 32767; // capacidade de representacao modelada
@@ -163,241 +163,246 @@ public class Sistema {
 			while (!cpuStop) { // ciclo de instrucoes. acaba cfe instrucao, veja cada caso.
 				// --------------------------------------------------------------------------------------------------
 				// FETCH
-				pc = so.processManager.running.pc;
-				if (legal(pc)) { // pc valido
-					pc = so.processManager.translateProgramCounter(so.processManager.running.pc);
+				if (so.processManager.running != null){
+					pc = so.processManager.running.pc;
+					if (legal(pc)) { // pc valido
+						pc = so.processManager.translateProgramCounter(so.processManager.running.pc);
 
-					ir = m[pc]; // <<<<<<<<<<<< busca posicao da memoria apontada por pc, guarda em ir
-					if (debug) {
-						System.out.print("                                                  regs: ");
-						for (int i = 0; i < 8; i++) {
-							System.out.print("    r[" + i + "]:" + reg[i]);
+						ir = m[pc]; // <<<<<<<<<<<< busca posicao da memoria apontada por pc, guarda em ir
+						if (debug) {
+							System.out.print("                                                  regs: ");
+							for (int i = 0; i < 8; i++) {
+								System.out.print("    r[" + i + "]:" + reg[i]);
+							}
+							;
+							System.out.println();
 						}
-						;
-						System.out.println();
-					}
-					if (debug) {
-						System.out.print("                               pc: " + pc + "       exec: ");
-						u.dump(ir);
-					}
-					
-					// --------------------------------------------------------------------------------------------------
-					// EXECUTA INSTRUCAO NO ir
-					switch (ir.opc) { // conforme o opcode (código de operação) executa
+						if (debug) {
+							System.out.print("                               pc: " + pc + "       exec: ");
+							u.dump(ir);
+						}
+						
+						// --------------------------------------------------------------------------------------------------
+						// EXECUTA INSTRUCAO NO ir
+						switch (ir.opc) { // conforme o opcode (código de operação) executa
 
-						// Instrucoes de Busca e Armazenamento em Memoria
-						case LDI: // Rd ← k
-							reg[ir.ra] = ir.p;
-							so.processManager.running.incLogicProgramCounter();
-							pc++;
-							break;
-						case LDD: // Rd <- [A]
-							if (legal(ir.p)) {
-								reg[ir.ra] = m[ir.p].p;
+							// Instrucoes de Busca e Armazenamento em Memoria
+							case LDI: // Rd ← k
+								reg[ir.ra] = ir.p;
 								so.processManager.running.incLogicProgramCounter();
 								pc++;
-							}
-							break;
-						case LDX: // RD <- [RS] // NOVA
-							if (legal(reg[ir.rb])) {
-								reg[ir.ra] = m[reg[ir.rb]].p;
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case STD: // [A] ← Rs
-							if (legal(ir.p)) {
-								int address = so.processManager.translateProgramCounter(ir.p);
-								if(address != -1) {
-									m[address].opc = Opcode.DATA;
-									m[address].p = reg[ir.ra];
+								break;
+							case LDD: // Rd <- [A]
+								if (legal(ir.p)) {
+									reg[ir.ra] = m[ir.p].p;
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
 								}
+								break;
+							case LDX: // RD <- [RS] // NOVA
+								if (legal(reg[ir.rb])) {
+									reg[ir.ra] = m[reg[ir.rb]].p;
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case STD: // [A] ← Rs
+								if (legal(ir.p)) {
+									int address = so.processManager.translateProgramCounter(ir.p);
+									if(address != -1) {
+										m[address].opc = Opcode.DATA;
+										m[address].p = reg[ir.ra];
+									}
+									
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								;
+								break;
+							case STX: // [Rd] ←Rs
+								if (legal(reg[ir.ra])) {
+									int address = so.processManager.translateProgramCounter(reg[ir.ra]);
+									m[address].opc = Opcode.DATA;
+									m[address].p = reg[ir.rb];
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								;
+								break;
+							case MOVE: // RD <- RS
+								reg[ir.ra] = reg[ir.rb];
+								so.processManager.running.incLogicProgramCounter();
+								pc++;
+								break;
+							// Instrucoes Aritmeticas
+							case ADD: // Rd ← Rd + Rs
+								reg[ir.ra] = reg[ir.ra] + reg[ir.rb];
+								testOverflow(reg[ir.ra]);
+								so.processManager.running.incLogicProgramCounter();
+								pc++;
+								break;
+							case ADDI: // Rd ← Rd + k
+								reg[ir.ra] = reg[ir.ra] + ir.p;
+								testOverflow(reg[ir.ra]);
+								so.processManager.running.incLogicProgramCounter();
+								pc++;
+								break;
+							case SUB: // Rd ← Rd - Rs
+								reg[ir.ra] = reg[ir.ra] - reg[ir.rb];
+								testOverflow(reg[ir.ra]);
+								so.processManager.running.incLogicProgramCounter();
+								pc++;
+								break;
+							case SUBI: // RD <- RD - k // NOVA
+								reg[ir.ra] = reg[ir.ra] - ir.p;
+								testOverflow(reg[ir.ra]);
+								so.processManager.running.incLogicProgramCounter();
+								pc++;
+								break;
+							case MULT: // Rd <- Rd * Rs
+								reg[ir.ra] = reg[ir.ra] * reg[ir.rb];
+								testOverflow(reg[ir.ra]);
+								so.processManager.running.incLogicProgramCounter();
+								pc++;
+								break;
+
+							// Instrucoes JUMP
+							case JMP: // PC <- k
+								so.processManager.running.setPc(ir.p);
+								pc = ir.p;
+								break;
+							case JMPIM: // PC <- [A]
+								so.processManager.running.setPc(m[ir.p].p);
+								pc = m[ir.p].p;
+								break;
+							case JMPIG: // If Rc > 0 Then PC ← Rs Else PC ← PC +1
+								if (reg[ir.rb] > 0) {
+									so.processManager.running.setPc(reg[ir.ra]);
+									pc = reg[ir.ra];
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPIGK: // If RC > 0 then PC <- k else PC++
+								if (reg[ir.rb] > 0) {
+									so.processManager.running.setPc(ir.p);
+									pc = ir.p;
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPILK: // If RC < 0 then PC <- k else PC++
+								if (reg[ir.rb] < 0) {
+									so.processManager.running.setPc(ir.p);
+									pc = ir.p;
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPIEK: // If RC = 0 then PC <- k else PC++
+								if (reg[ir.rb] == 0) {
+									so.processManager.running.setPc(ir.p);
+									pc = ir.p;
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPIL: // if Rc < 0 then PC <- Rs Else PC <- PC +1
+								if (reg[ir.rb] < 0) {
+									so.processManager.running.setPc(reg[ir.ra]);
+									pc = reg[ir.ra];
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPIE: // If Rc = 0 Then PC <- Rs Else PC <- PC +1
+								if (reg[ir.rb] == 0) {
+									so.processManager.running.setPc(reg[ir.ra]);
+									pc = reg[ir.ra];
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPIGM: // If RC > 0 then PC <- [A] else PC++
+								if (reg[ir.rb] > 0) {
+									so.processManager.running.setPc(m[ir.p].p);
+									pc = m[ir.p].p;
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPILM: // If RC < 0 then PC <- k else PC++
+								if (reg[ir.rb] < 0) {
+									so.processManager.running.setPc(m[ir.p].p);
+									pc = m[ir.p].p;
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPIEM: // If RC = 0 then PC <- k else PC++
+								if (reg[ir.rb] == 0) {
+									so.processManager.running.setPc(m[ir.p].p);
+									pc = m[ir.p].p;
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+							case JMPIGT: // If RS>RC then PC <- k else PC++
+								if (reg[ir.ra] > reg[ir.rb]) {
+									so.processManager.running.setPc(ir.p);
+									pc = ir.p;
+								} else {
+									so.processManager.running.incLogicProgramCounter();
+									pc++;
+								}
+								break;
+
+							case DATA: // pc está sobre área supostamente de dados
+								irpt = Interrupts.intInstrucaoInvalida;
+								break;
+
+							// Chamadas de sistema
+							case SYSCALL:
+								so.processManager.running.incLogicProgramCounter();
+								sysCall.handle(); // <<<<< aqui desvia para rotina de chamada de sistema, no momento so
 								
-								so.processManager.running.incLogicProgramCounter();
+								cpuStop = true;// temos IO
 								pc++;
-							}
-							;
-							break;
-						case STX: // [Rd] ←Rs
-							if (legal(reg[ir.ra])) {
-								int address = so.processManager.translateProgramCounter(reg[ir.ra]);
-								m[address].opc = Opcode.DATA;
-								m[address].p = reg[ir.rb];
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							;
-							break;
-						case MOVE: // RD <- RS
-							reg[ir.ra] = reg[ir.rb];
-							so.processManager.running.incLogicProgramCounter();
-							pc++;
-							break;
-						// Instrucoes Aritmeticas
-						case ADD: // Rd ← Rd + Rs
-							reg[ir.ra] = reg[ir.ra] + reg[ir.rb];
-							testOverflow(reg[ir.ra]);
-							so.processManager.running.incLogicProgramCounter();
-							pc++;
-							break;
-						case ADDI: // Rd ← Rd + k
-							reg[ir.ra] = reg[ir.ra] + ir.p;
-							testOverflow(reg[ir.ra]);
-							so.processManager.running.incLogicProgramCounter();
-							pc++;
-							break;
-						case SUB: // Rd ← Rd - Rs
-							reg[ir.ra] = reg[ir.ra] - reg[ir.rb];
-							testOverflow(reg[ir.ra]);
-							so.processManager.running.incLogicProgramCounter();
-							pc++;
-							break;
-						case SUBI: // RD <- RD - k // NOVA
-							reg[ir.ra] = reg[ir.ra] - ir.p;
-							testOverflow(reg[ir.ra]);
-							so.processManager.running.incLogicProgramCounter();
-							pc++;
-							break;
-						case MULT: // Rd <- Rd * Rs
-							reg[ir.ra] = reg[ir.ra] * reg[ir.rb];
-							testOverflow(reg[ir.ra]);
-							so.processManager.running.incLogicProgramCounter();
-							pc++;
-							break;
+								break;
 
-						// Instrucoes JUMP
-						case JMP: // PC <- k
-							so.processManager.running.setPc(ir.p);
-							pc = ir.p;
-							break;
-						case JMPIM: // PC <- [A]
-							so.processManager.running.setPc(m[ir.p].p);
-							pc = m[ir.p].p;
-							break;
-						case JMPIG: // If Rc > 0 Then PC ← Rs Else PC ← PC +1
-							if (reg[ir.rb] > 0) {
-								so.processManager.running.setPc(reg[ir.ra]);
-								pc = reg[ir.ra];
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPIGK: // If RC > 0 then PC <- k else PC++
-							if (reg[ir.rb] > 0) {
-								so.processManager.running.setPc(ir.p);
-								pc = ir.p;
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPILK: // If RC < 0 then PC <- k else PC++
-							if (reg[ir.rb] < 0) {
-								so.processManager.running.setPc(ir.p);
-								pc = ir.p;
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPIEK: // If RC = 0 then PC <- k else PC++
-							if (reg[ir.rb] == 0) {
-								so.processManager.running.setPc(ir.p);
-								pc = ir.p;
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPIL: // if Rc < 0 then PC <- Rs Else PC <- PC +1
-							if (reg[ir.rb] < 0) {
-								so.processManager.running.setPc(reg[ir.ra]);
-								pc = reg[ir.ra];
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPIE: // If Rc = 0 Then PC <- Rs Else PC <- PC +1
-							if (reg[ir.rb] == 0) {
-								so.processManager.running.setPc(reg[ir.ra]);
-								pc = reg[ir.ra];
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPIGM: // If RC > 0 then PC <- [A] else PC++
-							if (reg[ir.rb] > 0) {
-								so.processManager.running.setPc(m[ir.p].p);
-								pc = m[ir.p].p;
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPILM: // If RC < 0 then PC <- k else PC++
-							if (reg[ir.rb] < 0) {
-								so.processManager.running.setPc(m[ir.p].p);
-								pc = m[ir.p].p;
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPIEM: // If RC = 0 then PC <- k else PC++
-							if (reg[ir.rb] == 0) {
-								so.processManager.running.setPc(m[ir.p].p);
-								pc = m[ir.p].p;
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
-						case JMPIGT: // If RS>RC then PC <- k else PC++
-							if (reg[ir.ra] > reg[ir.rb]) {
-								so.processManager.running.setPc(ir.p);
-								pc = ir.p;
-							} else {
-								so.processManager.running.incLogicProgramCounter();
-								pc++;
-							}
-							break;
+							case STOP: // por enquanto, para execucao
+								sysCall.stop();
+								System.out.println("1 processo finalizado: \nNome:" +so.processManager.running.name + "\n" + "ID: " +so.processManager.running.id + "\n");
+								System.out.println("Final Dump: ");
+								u.dump(so.processManager.running.id);
+								so.processManager.dieProcess(so.processManager.running.id);
+								so.processManager.running = null;
 
-						case DATA: // pc está sobre área supostamente de dados
-							irpt = Interrupts.intInstrucaoInvalida;
-							break;
+								if(so.processManager.readyQueue.size() > 0 && useScheduler)
+									so.scheduler.runningNext(null);
+								else
+									cpuStop = true;
+								break;
 
-						// Chamadas de sistema
-						case SYSCALL:
-							sysCall.handle(); // <<<<< aqui desvia para rotina de chamada de sistema, no momento so
-												// temos IO
-							
-							so.processManager.running.incLogicProgramCounter();
-							pc++;
-							break;
-
-						case STOP: // por enquanto, para execucao
-							sysCall.stop();
-							System.out.println("1 processo finalizado: \nNome:" +so.processManager.running.name + "\n" + "ID: " +so.processManager.running.id + "\n");
-							System.out.println("Final Dump: ");
-							u.dump(so.processManager.running.id);
-							so.processManager.dieProcess(so.processManager.running.id);
-							so.processManager.running = null;
-
-							if(so.processManager.readyQueue.size() > 0 && useScheduler)
-								so.scheduler.runningNext(null);
-							else
-								cpuStop = true;
-							break;
-
-						// Inexistente
-						default:
-							irpt = Interrupts.intInstrucaoInvalida;
-							break;
+							// Inexistente
+							default:
+								irpt = Interrupts.intInstrucaoInvalida;
+								break;
+						}
 					}
+				} else{
+					cpuStop = true;	
 				}
+				
 				// --------------------------------------------------------------------------------------------------
 				// VERIFICA INTERRUPÇÃO !!! - TERCEIRA FASE DO CICLO DE INSTRUÇÕES
 				if (irpt != Interrupts.noInterrupt) { // existe interrupção
@@ -409,8 +414,8 @@ public class Sistema {
 						cpuStop = true;
 				}
 
-				if(so.scheduler.checkTimerInterrupt() && useScheduler){
-					so.scheduler.runningNext(null);
+				if(so.scheduler.checkTimerInterrupt() ){
+					cpuStop = true;
 				}
 			} // FIM DO CICLO DE UMA INSTRUÇÃO
 		}
@@ -423,11 +428,11 @@ public class Sistema {
 					readyCPU.acquire();
 					
 					// Processo está rodando
-					System.out.println("CPU is running");
+					//System.out.println("CPU is running");
 					// Roda o processo na CPU (possui o timer de interrupção lá dentro)
 					hw.cpu.run(false);
 					// Processo finalizou ou foi interrompido, CPU livre
-					System.out.println("CPU is free");
+					//	System.out.println("CPU is free");
 	
 					// Libera o semáforo para o escalonador (semáforo)
 					finishedCPU.release();
@@ -511,7 +516,7 @@ public class Sistema {
 		//Fila de processos bloqueados por IO
 		private Queue<ProcessManager.ProcessControlBlock> blockedQueue;
 		//Fila de requisições de IO
-		private Queue<RequestIO> requestIOQueue;
+		private volatile Queue<RequestIO> requestIOQueue;
 
 		public IOManager() {
 			blockedQueue = new LinkedList<>();
@@ -525,7 +530,7 @@ public class Sistema {
 		 * @param address endereço de memória para output, ou salvar input
 		 */
 		public void addRequestIO(ProcessManager.ProcessControlBlock pcb, String type, int address) {
-			requestIOQueue.add(new RequestIO(pcb.id, type, address));
+			requestIOQueue.add(new RequestIO(pcb.id, type, so.processManager.translateProgramCounter(address)));
 		}
 
 		/**
@@ -533,6 +538,7 @@ public class Sistema {
 		 * @param pcb processo a ser bloqueado
 		 */
 		public void addBlockedProcess(ProcessManager.ProcessControlBlock pcb) {
+			so.processManager.running = null;
 			blockedQueue.add(pcb);
 		}
 
@@ -540,10 +546,18 @@ public class Sistema {
 		 * Método chamado quando a requisição de IO está pronta
 		 */
 		public void onRequestIsReady(){
-			//Pega o processo da fila de bloqueados
-			ProcessManager.ProcessControlBlock pcb = blockedQueue.poll();
-			//Passa ele para pronto e finaliza a requisição
-			so.processManager.readyQueue.add(pcb);
+			try{
+				so.readyQueueControl.acquire();
+				//Pega o processo da fila de bloqueados 
+				ProcessManager.ProcessControlBlock pcb = blockedQueue.poll();
+				//Passa ele para pronto e finaliza a requisição
+				so.processManager.readyQueue.add(pcb);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			} finally {
+				so.readyQueueControl.release(); 
+			}
+			
 			so.console.onEndRequest();
 		}
 	}
@@ -561,11 +575,12 @@ public class Sistema {
 			while(true){
 				//Se temos processo para pegar, e não tivermos um atual
 				if(currentRequest == null && so.ioManager.requestIOQueue.size() > 0 && !pendingRequest){
+					System.out.println("Processando requisição de IO");
 					currentRequest = so.ioManager.requestIOQueue.poll();
+					processRequest();
 				}
 
-				//Processa a requisição atual
-				processRequest();
+				//Processa a requisição atua	
 			}
 		}
 
@@ -608,7 +623,9 @@ public class Sistema {
 		 * @param value valor de output
 		 */
 		public void outputCommand(int value){
-			System.out.println("Processo " + currentRequest.pid + "Output:" + value);
+			System.out.println("==========================================================");
+			System.out.println("Processo " + currentRequest.pid + "\nOUTPUT:" + value);
+			System.out.println("==========================================================");
 			onCreateInterrupt();
 		}
 
@@ -649,11 +666,12 @@ public class Sistema {
 			// salva o estado do processo
 			so.processManager.running.record.saveRecord();
 
-			// Coloca o processo na fila de bloqueados por IO
-			so.ioManager.addBlockedProcess(so.processManager.running);
-
+			System.out.println("Processo " + so.processManager.running.id + " fazendo requisição de IO: " + typeIO);
 			// Cria o request para o pedido de IO
 			so.ioManager.addRequestIO(so.processManager.running, typeIO, hw.cpu.reg[9]);
+
+			// Coloca o processo na fila de bloqueados por IO
+			so.ioManager.addBlockedProcess(so.processManager.running);	
 		}
 	}
 
@@ -826,6 +844,7 @@ public class Sistema {
 		public Scheduler scheduler;
 		public IOManager ioManager;
 		public Console console;
+		private Semaphore readyQueueControl;
 
 		public SO(HW hw, int tamPage, Semaphore _readyToExecute, Semaphore _finishedCPU, Semaphore _readyCPU) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
@@ -837,6 +856,7 @@ public class Sistema {
 			this.scheduler = new Scheduler(1, readyToExecute, readyCPU, finishedCPU);
 			this.ioManager = new IOManager();
 			this.console = new Console();
+			this.readyQueueControl = new Semaphore(1);
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -1040,14 +1060,22 @@ public class Sistema {
 			pcb.setPages(pages);                    //seta as páginas para o processo
 			pcb.setStatus(ProcessStatus.PRONTO);	//seta o estado do processo
 			this.allProcesses.add(pcb);             //adiciona o processo na lista de todos os processos
-			this.readyQueue.add(pcb);               //adiciona na lista de prontos
-
+			
+			try {
+				so.readyQueueControl.acquire(); 
+				this.readyQueue.add(pcb);               //adiciona na lista de prontos
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			} finally {
+				so.readyQueueControl.release();            //libera o semáforo para o escalonador
+			}
 			return pcb.id;
 		}
 
 		/**
 		 * Destori todo o registro do processo em memória
 		 * @param id - id do processo
+		 * 
 		 */
 		public boolean dieProcess(String id){
 			ProcessControlBlock pcb = this.getProcessById(id);  //busca o processo na lsita de todos
@@ -1055,7 +1083,15 @@ public class Sistema {
 			if(pcb != null){
 				memoryMananger.dealLocProg(pcb.pages);           //desaloca a memória
 				allProcesses.removeIf(pcbAux -> pcb.id == pcbAux.id);   //remove de todos
-    			readyQueue.removeIf(pcbAux -> pcb.id == pcbAux.id);	 //remove dos prontos, caso esteja
+				
+				try {
+					so.readyQueueControl.acquire(); 
+					readyQueue.removeIf(pcbAux -> pcb.id == pcbAux.id);	 //remove dos prontos, caso esteja
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				} finally {
+					so.readyQueueControl.release(); 
+				} 
 			} else {
 				return false;
 			}
@@ -1244,36 +1280,43 @@ public class Sistema {
 		 * @return
 		 */
 		public void runningNext(ProcessManager.ProcessControlBlock pcb) {
-			if(so.processManager.running != null){
-				// salva o estado do atual (DENTRO DO PCB)
-				so.processManager.running.record.saveRecord();
-				// atualiza o status do processo (PRONTO)
-				so.processManager.running.setStatus(ProcessStatus.PRONTO);
-				// Coloca o processo que estava RUNNING na fila de prontos
-				so.processManager.readyQueue.add(so.processManager.running);
-			}
-			
-			if(pcb != null){
-				int i = 0;
-				for (ProcessManager.ProcessControlBlock process : so.processManager.readyQueue) {
-					if (pcb.id.equals(process.id)) {
-						so.processManager.running =	pcb;
-						so.processManager.readyQueue.remove(i);
-					}
-					i++;
+			try{
+				so.readyQueueControl.acquire();
+				if(so.processManager.running != null){
+					// salva o estado do atual (DENTRO DO PCB)
+					so.processManager.running.record.saveRecord();
+					// atualiza o status do processo (PRONTO)
+					so.processManager.running.setStatus(ProcessStatus.PRONTO);
+					// Coloca o processo que estava RUNNING na fila de prontos
+					so.processManager.readyQueue.add(so.processManager.running);
 				}
-			} else {
-				so.processManager.running = so.processManager.readyQueue.poll();
+				
+				if(pcb != null){
+					int i = 0;
+					for (ProcessManager.ProcessControlBlock process : so.processManager.readyQueue) {
+						if (pcb.id.equals(process.id)) {
+							so.processManager.running =	pcb;
+							so.processManager.readyQueue.remove(i);
+						}
+						i++;
+					}
+				} else {
+					so.processManager.running = so.processManager.readyQueue.poll();
+				}
+				
+				// Carrega seu último estado
+				so.processManager.running.record.loadRecord();
+				// setar o startTime curretnTime
+				so.processManager.running.startTime = System.currentTimeMillis(); 
+				// seta o status como rodando
+				so.processManager.running.setStatus(ProcessStatus.EXECUTANDO);	
+				// setContext cpu
+				hw.cpu.setContext(so.processManager.running.pc); 
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			} finally {
+				so.readyQueueControl.release(); 
 			}
-			
-			// Carrega seu último estado
-			so.processManager.running.record.loadRecord();
-			// setar o startTime curretnTime
-			so.processManager.running.startTime = System.currentTimeMillis(); 
-			// seta o status como rodando
-			so.processManager.running.setStatus(ProcessStatus.EXECUTANDO);	
-			// setContext cpu
-			hw.cpu.setContext(so.processManager.running.pc);		
 		}
 
 		public boolean checkTimerInterrupt(){
@@ -1292,16 +1335,24 @@ public class Sistema {
 				try {
 					// Espera o sinal para liberar a CPU rodar (semáforo)
 					readyToExecute.acquire();
-					// Enquanto tiver processos na fila de prontos
-					while (!so.processManager.readyQueueIsEmpty()){
+
+				   // Enquanto tiver processos na fila de prontos
+					while(!so.processManager.readyQueueIsEmpty() || so.processManager.running != null || so.ioManager.blockedQueue.size() > 0){
 						// Retira o processo da CPU e executa o próximo da fila de prontos
-						so.scheduler.runningNext(null);
-						System.out.println(so.processManager.running.id + " is running");
+						if (!so.processManager.readyQueueIsEmpty()){
+							so.scheduler.runningNext(null);
+						} 
+						
+						if (so.processManager.running != null){
+							System.out.println(so.processManager.running.id + " is running");
+						}
+						
 						// Libera a CPU para rodar
 						readyCPU.release();
 						// Espera o sinal de finalização da CPU
-						finishedCPU.acquire();
+						finishedCPU.acquire();		
 					}
+					
 				} catch (InterruptedException e) {
 					e.printStackTrace();
 				}
@@ -1330,10 +1381,12 @@ public class Sistema {
 		Thread cpu = new Thread(hw.cpu);
 		Thread scheduler = new Thread(so.scheduler);
 		Thread user = new Thread(new UserShell(hw.cpu.u));
+		Thread console = new Thread(so.console);
 
 		cpu.start();
 		scheduler.start();
 		user.start();
+		console.start();
 		
 	
 		// so.utils.loadAndExec(progs.retrieveProgram("fatorial"));
@@ -1397,7 +1450,10 @@ public class Sistema {
 								new Word(Opcode.SUB, 0, 6, -1), // 6 r0 = r0 - r6 (r6=1) decrementa r0 para proximo
 																// termo
 								new Word(Opcode.JMP, -1, -1, 4), // 7 vai p posicao 4
-								new Word(Opcode.STD, 1, -1, 10), // 8 coloca valor de r1 na posição 10
+								new Word(Opcode.STD, 1, -1, 13), // 8 coloca valor de r1 na posição 10
+								new Word(Opcode.LDI, 8, -1, 2),
+								new Word(Opcode.LDI, 9, -1, 13), // endereco com valor a escrever
+								new Word(Opcode.SYSCALL, -1, -1, -1),
 								new Word(Opcode.STOP, -1, -1, -1), // 9 stop
 								new Word(Opcode.DATA, -1, -1, -1) // 10 ao final o valor está na posição 10 da memória
 						}),
@@ -1422,6 +1478,7 @@ public class Sistema {
 								new Word(Opcode.LDI, 9, -1, 18), // endereco com valor a escrever
 								new Word(Opcode.SYSCALL, -1, -1, -1),
 								new Word(Opcode.STOP, -1, -1, -1), // POS 17
+								new Word(Opcode.DATA, -1, -1, -1),  // POS 18
 								new Word(Opcode.DATA, -1, -1, -1) } // POS 18
 				),
 

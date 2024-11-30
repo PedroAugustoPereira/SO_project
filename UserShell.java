@@ -93,7 +93,8 @@ public class UserShell implements Runnable{
                     System.out.println("Parâmetros inválidos.");
                     return;
                 } 
-                this.utilities.in(parts[1], parts[2]);   
+                this.utilities.in(parts[1], parts[2]);
+                break;   
             default:
                 System.out.println("Comando não reconhecido.");
         }
