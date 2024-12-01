@@ -107,7 +107,8 @@ public class Sistema {
 		private boolean debug; // se true entao mostra cada instrucao em execucao
 		private Utilities u; // para debug (dump)
 
-		private Semaphore readyCPU, finishedCPU;
+		private Semaphore readyCPU, finishedCPU ;
+
 
 		public CPU(Memory _mem, boolean _debug, Semaphore _readyCPU, Semaphore _finishedCPU) { // ref a MEMORIA e interrupt handler passada na criacao da CPU
 			maxInt = 32767; // capacidade de representacao modelada
@@ -163,7 +164,11 @@ public class Sistema {
 			while (!cpuStop) { // ciclo de instrucoes. acaba cfe instrucao, veja cada caso.
 				// --------------------------------------------------------------------------------------------------
 				// FETCH
-				checkPageFault = so.vmManager.checkPageFault(so.processManager.running.pages, so.processManager.running.pc);
+				checkPageFault = false;
+				if(so.processManager.running != null){
+					checkPageFault = so.vmManager.checkPageFault(so.processManager.running.pages, so.processManager.running.pc);
+				} 
+				
 				if (so.processManager.running != null && !checkPageFault) {
 					pc = so.processManager.running.pc;
 					if (legal(pc)) { // pc valido
@@ -194,20 +199,39 @@ public class Sistema {
 								pc++;
 								break;
 							case LDD: // Rd <- [A]
+								if (so.vmManager.checkPageFault(so.processManager.running.pages, ir.p)){
+									so.vmManager.generatePageFault(ir.p);
+									cpuStop = true;
+									break;	
+								}
+
 								if (legal(ir.p)) {
-									reg[ir.ra] = m[ir.p].p;
+									reg[ir.ra] = m[so.processManager.translateAddress(ir.p)].p;
 									so.processManager.running.incLogicProgramCounter();
 									pc++;
-								}
+								} 
 								break;
 							case LDX: // RD <- [RS] // NOVA
+								if (so.vmManager.checkPageFault(so.processManager.running.pages, reg[ir.rb])){
+									so.vmManager.generatePageFault(reg[ir.rb]);
+									cpuStop = true;
+									break;	
+								}
+
 								if (legal(reg[ir.rb])) {
-									reg[ir.ra] = m[reg[ir.rb]].p;
+									int address = so.processManager.translateAddress(reg[ir.rb]);
+									reg[ir.ra] = m[address].p;
 									so.processManager.running.incLogicProgramCounter();
 									pc++;
 								}
 								break;
 							case STD: // [A] ← Rs
+								if (so.vmManager.checkPageFault(so.processManager.running.pages, ir.p)){
+									so.vmManager.generatePageFault(ir.p);
+									cpuStop = true;
+									break;	
+								}
+
 								if (legal(ir.p)) {
 									int address = so.processManager.translateAddress(ir.p);
 									if(address != -1) {
@@ -221,6 +245,12 @@ public class Sistema {
 								;
 								break;
 							case STX: // [Rd] ←Rs
+								if (so.vmManager.checkPageFault(so.processManager.running.pages, reg[ir.ra])){
+									so.vmManager.generatePageFault(reg[ir.ra]);
+									cpuStop = true;
+									break;	
+								}
+
 								if (legal(reg[ir.ra])) {
 									int address = so.processManager.translateAddress(reg[ir.ra]);
 									m[address].opc = Opcode.DATA;
@@ -373,6 +403,12 @@ public class Sistema {
 
 							// Chamadas de sistema
 							case SYSCALL:
+								if(so.vmManager.checkPageFault(so.processManager.running.pages, hw.cpu.reg[9])){
+									so.vmManager.generatePageFault(hw.cpu.reg[9]);
+									cpuStop = true;
+									break;
+								}
+
 								so.processManager.running.incLogicProgramCounter();
 								sysCall.handle(); // <<<<< aqui desvia para rotina de chamada de sistema, no momento so
 								
@@ -402,7 +438,7 @@ public class Sistema {
 					}
 				} else{
 					if(checkPageFault){
-						so.vmManager.generatePageFault();	
+						so.vmManager.generatePageFault(pc);	
 					}
 					cpuStop = true;	
 				}
@@ -520,7 +556,7 @@ public class Sistema {
 		}
 
 		//Fila de processos bloqueados por IO
-		private Queue<ProcessManager.ProcessControlBlock> blockedQueue;
+		private volatile Queue<ProcessManager.ProcessControlBlock> blockedQueue;
 		//Fila de requisições de IO
 		private volatile Queue<RequestIO> requestIOQueue;
 
@@ -537,6 +573,7 @@ public class Sistema {
 		 */
 		public void addRequestIO(ProcessManager.ProcessControlBlock pcb, String type, int address) {
 			requestIOQueue.add(new RequestIO(pcb.id, type, so.processManager.translateAddress(address)));
+			so.readyIOToProcessRequest.release();
 		}
 
 		/**
@@ -544,6 +581,7 @@ public class Sistema {
 		 * @param pcb processo a ser bloqueado
 		 */
 		public void addBlockedProcess(ProcessManager.ProcessControlBlock pcb) {
+			so.processManager.running.setStatus(ProcessStatus.BLOQUEADO);
 			so.processManager.running = null;
 			blockedQueue.add(pcb);
 		}
@@ -558,6 +596,7 @@ public class Sistema {
 				ProcessManager.ProcessControlBlock pcb = blockedQueue.poll();
 				//Passa ele para pronto e finaliza a requisição
 				so.processManager.readyQueue.add(pcb);
+				so.processManager.running.setStatus(ProcessStatus.PRONTO);
 			} catch (InterruptedException e) {
 				e.printStackTrace();
 			} finally {
@@ -570,23 +609,21 @@ public class Sistema {
 
 	public class Console implements Runnable{
 		public IOManager.RequestIO currentRequest;       //Requisição atual a ser processada
-		private boolean pendingRequest;                  //Indica se a requisição atual está pendente (esperando input)
 		
 		@Override
 		public void run() {
 			this.currentRequest  = null;
-			this.pendingRequest = false;
 
 			//Looping olhando para a fila de processos bloqueados por IO
 			while(true){
-				//Se temos processo para pegar, e não tivermos um atual
-				if(currentRequest == null && so.ioManager.requestIOQueue.size() > 0 && !pendingRequest){
+				try {
+					so.readyIOToProcessRequest.acquire();
 					System.out.println("Processando requisição de IO");
 					currentRequest = so.ioManager.requestIOQueue.poll();
 					processRequest();
+				} catch (InterruptedException e) {
+					e.printStackTrace();
 				}
-
-				//Processa a requisição atua	
 			}
 		}
 
@@ -594,20 +631,30 @@ public class Sistema {
 		 * Processa a requisição, (e a espera) enquanto houver
 		 */
 		private void processRequest(){
-			if(!this.pendingRequest && this.currentRequest != null){
+			if(this.currentRequest != null){
 				if (currentRequest.type.equals("IN")) {
-					//Agora essa request está pendente, esperando o input
-					this.pendingRequest = true;        
+					//Agora essa request está pendente, esperando o input  
 
 					//Se for input, devemos printar o nome do processo e que o mesmo está esperando um input
 					System.out.println("Processo " + currentRequest.pid + " esperando comando de input");
 					System.out.println("Template: in " +currentRequest.pid + " [Valor desejado] ");
 
-					//Nesse momento esperamos a Thread UserShell receber um comando para prosseguir
+					try {
+						so.inputShellIOReady.acquire();
+					} catch (InterruptedException e) {
+						e.printStackTrace();
+					} 
 				} else {
 					int value = hw.mem.pos[currentRequest.address].p;
 					outputCommand(value);
 				}
+
+				try {
+					so.interruptIOIsDone.acquire();
+					this.currentRequest  = null;
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				} 
 			}
 		}
 
@@ -617,10 +664,9 @@ public class Sistema {
 		 * @param value valor inteiro recebido pelo terminal
 		 */
 		public void inputCommand(int pId, int value){
-			if (pendingRequest){
-				hw.mem.pos[currentRequest.address].p = value;
-				onCreateInterrupt();	
-			}
+			hw.mem.pos[currentRequest.address].p = value;
+			so.inputShellIOReady.release();
+			onCreateInterrupt();	
 		}
 
 		/**
@@ -646,14 +692,13 @@ public class Sistema {
 		 * Limpa variaveis de controle da requisição atual para tratar a próxima
 		 */
 		public void onEndRequest(){
-			this.currentRequest  = null;
-			this.pendingRequest  = false;
+			so.interruptIOIsDone.release();
 		}
 	}
 
 	public class VirtualMemoryManager{
-		public Queue<RequestIOVirtualMemory> requests;
-		public Queue<ProcessManager.ProcessControlBlock> blockedQueueByVM; 
+		public volatile Queue<RequestIOVirtualMemory> requests;
+		public volatile Queue<ProcessManager.ProcessControlBlock> blockedQueueByVM; 
 
 		public VirtualMemoryManager(){
 			requests = new LinkedList<>();
@@ -665,6 +710,7 @@ public class Sistema {
 		}
 
 		public void addBlockedProcess(ProcessManager.ProcessControlBlock pcb){
+			so.processManager.running.setStatus(ProcessStatus.BLOQUEADO);
 			so.processManager.running = null;
 			blockedQueueByVM.add(pcb);
 		}
@@ -686,13 +732,23 @@ public class Sistema {
 
 		public void onRequestIsReady(){
 			ProcessManager.ProcessControlBlock pcb = blockedQueueByVM.poll();
-			so.processManager.readyQueue.add(pcb);
-			so.vmWorker.onEndRequest();
+			try{
+				so.readyQueueControl.acquire();
+				so.processManager.readyQueue.add(pcb);
+				so.processManager.running.setStatus(ProcessStatus.PRONTO);
+			}
+			catch (InterruptedException e) {
+				e.printStackTrace();
+			} finally {
+				so.readyQueueControl.release();
+				so.vmWorker.onEndRequest(); 
+			}		
 		}
 
-		public void generatePageFault(){
+		public void generatePageFault(int logicalAddress){
+			int page = this.getPage(logicalAddress);
 			so.processManager.running.record.saveRecord();
-			this.addRequestIOVM(so.processManager.running, so.processManager.running.name, so.processManager.running.pc);
+			this.addRequestIOVM(so.processManager.running, so.processManager.running.name, page);
 			this.addBlockedProcess(so.processManager.running);	
 		}
 
@@ -731,6 +787,7 @@ public class Sistema {
 			if(frameAddress != -1){
 				//Adiciona a página ao processo
 				so.processManager.getProcessById(this.currentRequest.pid).pages.set(this.currentRequest.page, frameAddress);
+				this.onCreateInterrupt();
 			}
 		}
 
@@ -866,6 +923,8 @@ public class Sistema {
 				String dumpMem = "";
 				for(int i  = 0 ; i < pcb.pages.size() ; i++){
 					int frameIndex = pcb.pages.get(i) * so.tamPage;
+					if(frameIndex < 0)
+						continue;
 
 					for(int j = frameIndex ; j <  (frameIndex + so.tamPage); j++){
 						dumpMem += "["+  j  + "]" + " -> " + hw.mem.pos[j].toString() + "\n";
@@ -948,6 +1007,8 @@ public class Sistema {
 		public VirtualMemoryManager vmManager;
 		public VirtualMemoryWorker vmWorker;
 		private Semaphore readyQueueControl;
+		public boolean useVirtualMemory;
+		public Semaphore readyIOToProcessRequest, inputShellIOReady, interruptIOIsDone;
 
 		public SO(HW hw, int tamPage, Semaphore _readyToExecute, Semaphore _finishedCPU, Semaphore _readyCPU) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
@@ -962,6 +1023,10 @@ public class Sistema {
 			this.readyQueueControl = new Semaphore(1);
 			this.vmManager = new VirtualMemoryManager();
 			this.vmWorker = new VirtualMemoryWorker();
+			useVirtualMemory = true;
+			readyIOToProcessRequest = new Semaphore(0);
+			inputShellIOReady = new Semaphore(0);
+			interruptIOIsDone = new Semaphore(0);
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -1004,16 +1069,26 @@ public class Sistema {
 		public ArrayList<Integer> alocFirstPage(Word[] words){
 			Word[] page = new Word[so.tamPage];
 
+			int totalPages = new BigDecimal(words.length)
+				.divide(new BigDecimal(so.tamPage), 0, RoundingMode.CEILING)
+				.round(new MathContext(0, RoundingMode.UP))
+				.intValue();
 
 			for(int i = 0 ; i < so.tamPage && words.length > i ; i++){
 				page[i] = words[i];
 			}
 
-			ArrayList<Integer> frames = getFrames(1); 
+			ArrayList<Integer> mapFrames = new ArrayList<>(totalPages); // Capacidade inicial
+			for (int i = 0; i < totalPages; i++) {
+				mapFrames.add(-1); // Adicionando um valor padrão (como -1) para cada posição
+			}
 
+			ArrayList<Integer> frames = getFrames(1); 
+			mapFrames.set(0,frames.get(0));
+			
 			if (frames != null){
 				setWordsInFrame(frames.get(0), page);
-				return frames;
+				return mapFrames;
 			}
 		
 			return null;
@@ -1026,17 +1101,17 @@ public class Sistema {
 		 * @return mapeamento do endereço físico do frame alocado
 		 */
 		public int alocByPageFault(String nameProgram, int page){
-			if(hasFreeFrames()){
+			if(!hasFreeFrames()){
 				System.out.println("Não há frames disponíveis para alocar as páginas do programa.");
 				return -1;
 			}
 			
 			Word[] words = getWordsByProgram(nameProgram);
-			this.getPageByIndex(words, page);
+			Word[] wordsToPage  = this.getPageByIndex(words, page);
 			
 			ArrayList<Integer> frames = getFrames(1); 
 			if (frames != null){
-				this.setWordsInFrame(frames.get(0), words);
+				this.setWordsInFrame(frames.get(0), wordsToPage);
 				return frames.get(0);
 			}
 		
@@ -1049,12 +1124,15 @@ public class Sistema {
 		 * @param words lista de words da página a ser populada
 		 * @param index índice da página a ser buscada
 		 */
-		public void getPageByIndex(Word[] words, int index){
+		public Word[] getPageByIndex(Word[] words, int index){
+			Word[] page = new Word[so.tamPage];
 			int indexWord = index * so.tamPage;
 
-			for(int i = 0 ; i < so.tamPage ; i++){
-				words[i] = hw.mem.pos[indexWord + i];
+			for(int i = 0; i < so.tamPage && words.length > (i + indexWord) ; i++){
+				page[i] = words[i + indexWord];
 			}
+
+			return page;
 		}
 
 		/**
@@ -1111,6 +1189,9 @@ public class Sistema {
 			for(int i = 0 ; i < mapFrames.size() ; i++){
 				//Pega o endereço físico do frame
 				int indexWord = mapFrames.get(i) * so.tamPage;
+
+				if(indexWord < 0)
+					continue;
 
 				//Percorre todos os endereços reservados do frame a partiri do seu início
 				for(int j = indexWord ; j < (indexWord + so.tamPage) ; j++){
@@ -1240,7 +1321,13 @@ public class Sistema {
 		 */
 		public String createProgram(Program prog, ProcessControlBlock parent){
 			ProcessControlBlock pcb = new ProcessControlBlock(prog.name, parent);
-			ArrayList<Integer> pages = memoryMananger.alocProg(prog.image);   //Criação da lista de páginas do processo
+			ArrayList<Integer> pages;
+			
+			if(so.useVirtualMemory){
+				pages = memoryMananger.alocFirstPage(prog.image); 
+			} else {
+				pages = memoryMananger.alocProg(prog.image); 
+			}
 
 			//Validação se há memória suficiente
 			if(pages == null){
@@ -1764,11 +1851,10 @@ public class Sistema {
 				new Program("fibonacciREAD",
 						new Word[] {
 								// mesmo que prog exemplo, so que usa r0 no lugar de r8
-								new Word(Opcode.LDI, 8, -1, 1), // leitura
+								new Word(Opcode.LDI, 8, -1, 1), // leitura 1
 								new Word(Opcode.LDI, 9, -1, 55), // endereco a guardar o tamanho da serie de fib a gerar
-																	// - pode ser de 1 a 20
-								new Word(Opcode.SYSCALL, -1, -1, -1),
-								new Word(Opcode.LDD, 7, -1, 55),
+								new Word(Opcode.SYSCALL, -1, -1, -1),//3
+								new Word(Opcode.LDD, 7, -1, 55),//4
 								new Word(Opcode.LDI, 3, -1, 0),
 								new Word(Opcode.ADD, 3, 7, -1),
 								new Word(Opcode.LDI, 4, -1, 36), // posicao para qual ira pular (stop) *
@@ -1778,8 +1864,7 @@ public class Sistema {
 								new Word(Opcode.JMPIE, 4, 7, -1), // pula pra stop caso 0
 								new Word(Opcode.ADDI, 7, -1, 41), // fibonacci + posição do stop
 								new Word(Opcode.LDI, 1, -1, 0),
-								new Word(Opcode.STD, 1, -1, 41), // 25 posicao de memoria onde inicia a serie de
-																	// fibonacci gerada
+								new Word(Opcode.STD, 1, -1, 41), // 25 posicao de memoria onde inicia a serie de									// fibonacci gerada
 								new Word(Opcode.SUBI, 3, -1, 1), // se 1 pula pro stop
 								new Word(Opcode.JMPIE, 4, 3, -1),
 								new Word(Opcode.ADDI, 3, -1, 1),
