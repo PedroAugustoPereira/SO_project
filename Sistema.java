@@ -82,7 +82,7 @@ public class Sistema {
 	}
 
 	public enum Interrupts { // possiveis interrupcoes que esta CPU gera
-		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow, intSTOP, intIORequestIsReady;
+		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow, intSTOP, intIORequestIsReady, intIORequestVMIsReady;
 	}
 
 	public class CPU implements Runnable{
@@ -158,15 +158,16 @@ public class Sistema {
 		}
 
 		public void run(boolean useScheduler) { // execucao da CPU supoe que o contexto da CPU, vide acima, esta devidamente
-							// setado					
+			boolean checkPageFault = false;				// setado					
 			cpuStop = false;
 			while (!cpuStop) { // ciclo de instrucoes. acaba cfe instrucao, veja cada caso.
 				// --------------------------------------------------------------------------------------------------
 				// FETCH
-				if (so.processManager.running != null){
+				checkPageFault = so.vmManager.checkPageFault(so.processManager.running.pages, so.processManager.running.pc);
+				if (so.processManager.running != null && !checkPageFault) {
 					pc = so.processManager.running.pc;
 					if (legal(pc)) { // pc valido
-						pc = so.processManager.translateProgramCounter(so.processManager.running.pc);
+						pc = so.processManager.translateAddress(so.processManager.running.pc);
 
 						ir = m[pc]; // <<<<<<<<<<<< busca posicao da memoria apontada por pc, guarda em ir
 						if (debug) {
@@ -208,7 +209,7 @@ public class Sistema {
 								break;
 							case STD: // [A] ← Rs
 								if (legal(ir.p)) {
-									int address = so.processManager.translateProgramCounter(ir.p);
+									int address = so.processManager.translateAddress(ir.p);
 									if(address != -1) {
 										m[address].opc = Opcode.DATA;
 										m[address].p = reg[ir.ra];
@@ -221,7 +222,7 @@ public class Sistema {
 								break;
 							case STX: // [Rd] ←Rs
 								if (legal(reg[ir.ra])) {
-									int address = so.processManager.translateProgramCounter(reg[ir.ra]);
+									int address = so.processManager.translateAddress(reg[ir.ra]);
 									m[address].opc = Opcode.DATA;
 									m[address].p = reg[ir.rb];
 									so.processManager.running.incLogicProgramCounter();
@@ -400,6 +401,9 @@ public class Sistema {
 						}
 					}
 				} else{
+					if(checkPageFault){
+						so.vmManager.generatePageFault();	
+					}
 					cpuStop = true;	
 				}
 				
@@ -407,11 +411,7 @@ public class Sistema {
 				// VERIFICA INTERRUPÇÃO !!! - TERCEIRA FASE DO CICLO DE INSTRUÇÕES
 				if (irpt != Interrupts.noInterrupt) { // existe interrupção
 					ih.handle(irpt); // desvia para rotina de tratamento
-					
-					if(so.processManager.readyQueue.size() > 0 && useScheduler)
-						so.scheduler.runningNext(null);
-					else
-						cpuStop = true;
+					cpuStop = true;
 				}
 
 				if(so.scheduler.checkTimerInterrupt() ){
@@ -489,6 +489,12 @@ public class Sistema {
 				//Trata a finalização da requisição
 				so.ioManager.onRequestIsReady();
 			}
+			else if(irpt == Interrupts.intIORequestVMIsReady){
+				so.vmManager.onRequestIsReady();
+			}
+				
+
+			
 		}
 
 		public void invalidAddress(){
@@ -530,7 +536,7 @@ public class Sistema {
 		 * @param address endereço de memória para output, ou salvar input
 		 */
 		public void addRequestIO(ProcessManager.ProcessControlBlock pcb, String type, int address) {
-			requestIOQueue.add(new RequestIO(pcb.id, type, so.processManager.translateProgramCounter(address)));
+			requestIOQueue.add(new RequestIO(pcb.id, type, so.processManager.translateAddress(address)));
 		}
 
 		/**
@@ -643,6 +649,101 @@ public class Sistema {
 			this.currentRequest  = null;
 			this.pendingRequest  = false;
 		}
+	}
+
+	public class VirtualMemoryManager{
+		public Queue<RequestIOVirtualMemory> requests;
+		public Queue<ProcessManager.ProcessControlBlock> blockedQueueByVM; 
+
+		public VirtualMemoryManager(){
+			requests = new LinkedList<>();
+			blockedQueueByVM = new LinkedList<>();
+		}
+
+		public void addRequestIOVM(ProcessManager.ProcessControlBlock pcb, String name, int page){
+			requests.add(new RequestIOVirtualMemory(pcb.id, name, page));
+		}
+
+		public void addBlockedProcess(ProcessManager.ProcessControlBlock pcb){
+			so.processManager.running = null;
+			blockedQueueByVM.add(pcb);
+		}
+
+		public boolean checkPageFault(ArrayList<Integer> pages, int logicalAddress){
+			int page = this.getPage(logicalAddress);	
+			
+			if(pages.get(page) == -1 || pages.get(page) == null){
+				return true;
+			}
+
+			return false;
+		}
+
+		public int getPage(int logicalAddress){
+			int page = (int) Math.floor(logicalAddress / so.tamPage);
+			return page;		
+		}
+
+		public void onRequestIsReady(){
+			ProcessManager.ProcessControlBlock pcb = blockedQueueByVM.poll();
+			so.processManager.readyQueue.add(pcb);
+			so.vmWorker.onEndRequest();
+		}
+
+		public void generatePageFault(){
+			so.processManager.running.record.saveRecord();
+			this.addRequestIOVM(so.processManager.running, so.processManager.running.name, so.processManager.running.pc);
+			this.addBlockedProcess(so.processManager.running);	
+		}
+
+		class RequestIOVirtualMemory {
+			public String pid;	//ID de processo
+			public String name;
+			public int page;
+
+			public RequestIOVirtualMemory(String pid, String name, int page) {
+				this.pid = pid;
+				this.name = name;
+				this.page = page;
+			}
+		}
+	}
+
+	public class VirtualMemoryWorker implements Runnable{
+		public VirtualMemoryManager.RequestIOVirtualMemory currentRequest  = null;
+		
+		public VirtualMemoryWorker(){
+			this.currentRequest = null;
+		}
+
+		@Override
+		public void run() {
+			while(true){
+				if(so.vmManager.requests.size() > 0 && currentRequest == null){
+					currentRequest = so.vmManager.requests.poll();
+					processRequest();
+				}
+			}
+		}
+
+		public void processRequest(){
+			int frameAddress = memoryMananger.alocByPageFault(this.currentRequest.name, this.currentRequest.page);
+			if(frameAddress != -1){
+				//Adiciona a página ao processo
+				so.processManager.getProcessById(this.currentRequest.pid).pages.set(this.currentRequest.page, frameAddress);
+			}
+		}
+
+		public void onCreateInterrupt(){
+			hw.cpu.irpt = Interrupts.intIORequestVMIsReady;
+		}
+
+	    /**
+		* Limpa variaveis de controle da requisição atual para tratar a próxima
+		*/
+		public void onEndRequest(){
+			this.currentRequest  = null;
+	   	}
 	}
 
 
@@ -844,6 +945,8 @@ public class Sistema {
 		public Scheduler scheduler;
 		public IOManager ioManager;
 		public Console console;
+		public VirtualMemoryManager vmManager;
+		public VirtualMemoryWorker vmWorker;
 		private Semaphore readyQueueControl;
 
 		public SO(HW hw, int tamPage, Semaphore _readyToExecute, Semaphore _finishedCPU, Semaphore _readyCPU) {
@@ -857,6 +960,8 @@ public class Sistema {
 			this.ioManager = new IOManager();
 			this.console = new Console();
 			this.readyQueueControl = new Semaphore(1);
+			this.vmManager = new VirtualMemoryManager();
+			this.vmWorker = new VirtualMemoryWorker();
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -889,6 +994,81 @@ public class Sistema {
 		public MemoryMananger(){
 			this.numFrames = (hw.mem.tamMem / so.tamPage);          //cáculo para pegar o número de frames
 			this.frameMemoryBlockUsed = new boolean[this.numFrames];   //nosso array de frames usados com o tamanho de frames.	
+		}
+
+		/**
+		 * Método responsável por alocar somente uma página de um programa em memória
+		 * @param words array de palavras de um programa
+		 * @return mapeamento das páginas de um programa contendo somente uma página
+		 */
+		public ArrayList<Integer> alocFirstPage(Word[] words){
+			Word[] page = new Word[so.tamPage];
+
+
+			for(int i = 0 ; i < so.tamPage && words.length > i ; i++){
+				page[i] = words[i];
+			}
+
+			ArrayList<Integer> frames = getFrames(1); 
+
+			if (frames != null){
+				setWordsInFrame(frames.get(0), page);
+				return frames;
+			}
+		
+			return null;
+		}
+
+		/**
+		 * Método responsável por alocar uma página específica em memória, com base no nome do programa
+		 * @param nameProgram nome do programa a ser buscada a página
+		 * @param page número da página a ser buscada
+		 * @return mapeamento do endereço físico do frame alocado
+		 */
+		public int alocByPageFault(String nameProgram, int page){
+			if(hasFreeFrames()){
+				System.out.println("Não há frames disponíveis para alocar as páginas do programa.");
+				return -1;
+			}
+			
+			Word[] words = getWordsByProgram(nameProgram);
+			this.getPageByIndex(words, page);
+			
+			ArrayList<Integer> frames = getFrames(1); 
+			if (frames != null){
+				this.setWordsInFrame(frames.get(0), words);
+				return frames.get(0);
+			}
+		
+			return -1;
+		}
+
+	
+		/**
+		 * Método que busca todas as words de uma página específica de um programa, e popula a lista
+		 * @param words lista de words da página a ser populada
+		 * @param index índice da página a ser buscada
+		 */
+		public void getPageByIndex(Word[] words, int index){
+			int indexWord = index * so.tamPage;
+
+			for(int i = 0 ; i < so.tamPage ; i++){
+				words[i] = hw.mem.pos[indexWord + i];
+			}
+		}
+
+		/**
+		 * Método que busca todas as palavras de um programa com base no nome
+		 * @param name nome do programa
+		 * @return
+		 */
+		public Word[] getWordsByProgram(String name){
+			for(Program programAux :  progs.progs){
+				if (programAux.name.equals(name)) {
+					return programAux.image;
+				}	
+			}
+			return null;		
 		}
 
 		/**
@@ -1029,6 +1209,16 @@ public class Sistema {
 					hw.mem.pos[memPos + i] = words[i];
 			}
 		}
+
+
+		private boolean hasFreeFrames(){
+			for (int i = 0; i < this.frameMemoryBlockUsed.length; i++) {
+				if (this.frameMemoryBlockUsed[i] == false){
+					return true;
+				}
+			}
+			return false;
+		}
 	}
 
 	public class ProcessManager{
@@ -1109,7 +1299,7 @@ public class Sistema {
 		 * @param logicalPosition endereço lógico
 		 * @return endereço físico da posição
 		 */
-		public int translateProgramCounter(int logicalPosition){
+		public int translateAddress(int logicalPosition){
 			try{
 				int page = (int) Math.floor(logicalPosition / so.tamPage);
 
@@ -1337,7 +1527,7 @@ public class Sistema {
 					readyToExecute.acquire();
 
 				   // Enquanto tiver processos na fila de prontos
-					while(!so.processManager.readyQueueIsEmpty() || so.processManager.running != null || so.ioManager.blockedQueue.size() > 0){
+					while(!so.processManager.readyQueueIsEmpty() || so.processManager.running != null || so.ioManager.blockedQueue.size() > 0 || so.vmManager.blockedQueueByVM.size() >0){
 						// Retira o processo da CPU e executa o próximo da fila de prontos
 						if (!so.processManager.readyQueueIsEmpty()){
 							so.scheduler.runningNext(null);
@@ -1382,11 +1572,13 @@ public class Sistema {
 		Thread scheduler = new Thread(so.scheduler);
 		Thread user = new Thread(new UserShell(hw.cpu.u));
 		Thread console = new Thread(so.console);
+		Thread vmWorder = new Thread(so.vmWorker);
 
 		cpu.start();
 		scheduler.start();
 		user.start();
 		console.start();
+		vmWorder.start();
 		
 	
 		// so.utils.loadAndExec(progs.retrieveProgram("fatorial"));
