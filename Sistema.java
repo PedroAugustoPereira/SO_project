@@ -93,7 +93,7 @@ public class Sistema {
 		private int pc; // ... composto de program counter,
 		private Word ir; // instruction register,
 		private int[] reg; // registradores da CPU
-		private Interrupts irpt; // durante instrucao, interrupcao pode ser sinalizada
+		private volatile Interrupts irpt; // durante instrucao, interrupcao pode ser sinalizada
 		// FIM CONTEXTO DA CPU: tudo que precisa sobre o estado de um processo para
 		// executa-lo
 		// nas proximas versoes isto pode modificar
@@ -155,7 +155,7 @@ public class Sistema {
 
 		public void setContext(int _pc) {
 			pc = _pc; // pc cfe endereco logico
-			irpt = Interrupts.noInterrupt; // reset da interrupcao registrada
+			//ih.setInterrupt(Interrupts.noInterrupt);
 		}
 
 		public void run(boolean useScheduler) { // execucao da CPU supoe que o contexto da CPU, vide acima, esta devidamente
@@ -303,8 +303,15 @@ public class Sistema {
 								pc = ir.p;
 								break;
 							case JMPIM: // PC <- [A]
-								so.processManager.running.setPc(m[ir.p].p);
-								pc = m[ir.p].p;
+								if (so.vmManager.checkPageFault(so.processManager.running.pages, ir.p)){
+									so.vmManager.generatePageFault(ir.p);
+									cpuStop = true;
+									break;	
+								}
+
+								int address = so.processManager.translateAddress(ir.p);
+								so.processManager.running.setPc(m[address].p);
+								pc = m[address].p;
 								break;
 							case JMPIG: // If Rc > 0 Then PC ← Rs Else PC ← PC +1
 								if (reg[ir.rb] > 0) {
@@ -362,8 +369,14 @@ public class Sistema {
 								break;
 							case JMPIGM: // If RC > 0 then PC <- [A] else PC++
 								if (reg[ir.rb] > 0) {
-									so.processManager.running.setPc(m[ir.p].p);
-									pc = m[ir.p].p;
+									if (so.vmManager.checkPageFault(so.processManager.running.pages, ir.p)){
+										so.vmManager.generatePageFault(ir.p);
+										cpuStop = true;
+										break;	
+									}
+									address = so.processManager.translateAddress(ir.p);
+									so.processManager.running.setPc(m[address].p);
+									pc = m[address].p;
 								} else {
 									so.processManager.running.incLogicProgramCounter();
 									pc++;
@@ -371,8 +384,14 @@ public class Sistema {
 								break;
 							case JMPILM: // If RC < 0 then PC <- k else PC++
 								if (reg[ir.rb] < 0) {
-									so.processManager.running.setPc(m[ir.p].p);
-									pc = m[ir.p].p;
+									if (so.vmManager.checkPageFault(so.processManager.running.pages, ir.p)){
+										so.vmManager.generatePageFault(ir.p);
+										cpuStop = true;
+										break;	
+									}
+
+									so.processManager.running.setPc(m[so.processManager.translateAddress(ir.p)].p);
+									pc = m[so.processManager.translateAddress(ir.p)].p;
 								} else {
 									so.processManager.running.incLogicProgramCounter();
 									pc++;
@@ -380,8 +399,14 @@ public class Sistema {
 								break;
 							case JMPIEM: // If RC = 0 then PC <- k else PC++
 								if (reg[ir.rb] == 0) {
-									so.processManager.running.setPc(m[ir.p].p);
-									pc = m[ir.p].p;
+									if (so.vmManager.checkPageFault(so.processManager.running.pages, ir.p)){
+										so.vmManager.generatePageFault(ir.p);
+										cpuStop = true;
+										break;	
+									}
+									address = so.processManager.translateAddress(ir.p);
+									so.processManager.running.setPc(m[address].p);
+									pc = m[address].p;
 								} else {
 									so.processManager.running.incLogicProgramCounter();
 									pc++;
@@ -437,8 +462,8 @@ public class Sistema {
 						}
 					}
 				} else{
-					if(checkPageFault){
-						so.vmManager.generatePageFault(pc);	
+					if(checkPageFault && so.processManager.running != null){
+						so.vmManager.generatePageFault(so.processManager.running.pc);	
 					}
 					cpuStop = true;	
 				}
@@ -448,6 +473,8 @@ public class Sistema {
 				if (irpt != Interrupts.noInterrupt) { // existe interrupção
 					ih.handle(irpt); // desvia para rotina de tratamento
 					cpuStop = true;
+					irpt = Interrupts.noInterrupt;
+					so.setInterruptSemaphore.release();
 				}
 
 				if(so.scheduler.checkTimerInterrupt() ){
@@ -528,9 +555,15 @@ public class Sistema {
 			else if(irpt == Interrupts.intIORequestVMIsReady){
 				so.vmManager.onRequestIsReady();
 			}
-				
+		}
 
-			
+		public void setInterrupt(Interrupts irpt) {
+			try {
+				so.setInterruptSemaphore.acquire();
+				hw.cpu.irpt = irpt;
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
 		}
 
 		public void invalidAddress(){
@@ -581,7 +614,7 @@ public class Sistema {
 		 * @param pcb processo a ser bloqueado
 		 */
 		public void addBlockedProcess(ProcessManager.ProcessControlBlock pcb) {
-			so.processManager.running.setStatus(ProcessStatus.BLOQUEADO);
+			so.processManager.running.setStatus(ProcessStatus.BLOQUEADO_IO);
 			so.processManager.running = null;
 			blockedQueue.add(pcb);
 		}
@@ -591,12 +624,14 @@ public class Sistema {
 		 */
 		public void onRequestIsReady(){
 			try{
+				
 				so.readyQueueControl.acquire();
 				//Pega o processo da fila de bloqueados 
 				ProcessManager.ProcessControlBlock pcb = blockedQueue.poll();
+				System.out.println("Finalizando requisição de IO " + pcb.id);
 				//Passa ele para pronto e finaliza a requisição
 				so.processManager.readyQueue.add(pcb);
-				so.processManager.running.setStatus(ProcessStatus.PRONTO);
+				pcb.setStatus(ProcessStatus.PRONTO);
 			} catch (InterruptedException e) {
 				e.printStackTrace();
 			} finally {
@@ -618,8 +653,8 @@ public class Sistema {
 			while(true){
 				try {
 					so.readyIOToProcessRequest.acquire();
-					System.out.println("Processando requisição de IO");
 					currentRequest = so.ioManager.requestIOQueue.poll();
+					System.out.println("Processando requisição de IO: " + currentRequest.pid);
 					processRequest();
 				} catch (InterruptedException e) {
 					e.printStackTrace();
@@ -640,6 +675,7 @@ public class Sistema {
 					System.out.println("Template: in " +currentRequest.pid + " [Valor desejado] ");
 
 					try {
+						System.out.println("Tentando pegar recurso do input " + currentRequest.pid);
 						so.inputShellIOReady.acquire();
 					} catch (InterruptedException e) {
 						e.printStackTrace();
@@ -650,11 +686,17 @@ public class Sistema {
 				}
 
 				try {
+					System.out.println("Esperando interrupção ser tratada " + currentRequest.pid);
+					
 					so.interruptIOIsDone.acquire();
+					System.out.println("Requisição tratada com sucesso " + currentRequest.pid);
 					this.currentRequest  = null;
 				} catch (InterruptedException e) {
 					e.printStackTrace();
 				} 
+			}
+			else{
+				System.out.println("Requisição nula AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
 			}
 		}
 
@@ -664,9 +706,11 @@ public class Sistema {
 		 * @param value valor inteiro recebido pelo terminal
 		 */
 		public void inputCommand(int pId, int value){
-			hw.mem.pos[currentRequest.address].p = value;
-			so.inputShellIOReady.release();
-			onCreateInterrupt();	
+			if(currentRequest != null){
+				hw.mem.pos[currentRequest.address].p = value;
+				so.inputShellIOReady.release();
+				onCreateInterrupt();	
+			}	
 		}
 
 		/**
@@ -685,20 +729,23 @@ public class Sistema {
 		 * Gera a uma interrupção para CPU do tipo IOReady
 		 */
 		public void onCreateInterrupt(){
-			hw.cpu.irpt = Interrupts.intIORequestIsReady;
+			System.out.println("Tentando pegar recurso de interrupção de IO" + currentRequest.pid);
+			hw.cpu.ih.setInterrupt(Interrupts.intIORequestIsReady);	
+			System.out.println("TInterrupção de IO " + currentRequest.pid);
 		}
 
 		/**
 		 * Limpa variaveis de controle da requisição atual para tratar a próxima
 		 */
 		public void onEndRequest(){
+			System.out.println("Finalizando requisição de IO " + currentRequest.pid);
 			so.interruptIOIsDone.release();
 		}
 	}
 
 	public class VirtualMemoryManager{
 		public volatile Queue<RequestIOVirtualMemory> requests;
-		public volatile Queue<ProcessManager.ProcessControlBlock> blockedQueueByVM; 
+		public Queue<ProcessManager.ProcessControlBlock> blockedQueueByVM; 
 
 		public VirtualMemoryManager(){
 			requests = new LinkedList<>();
@@ -707,12 +754,13 @@ public class Sistema {
 
 		public void addRequestIOVM(ProcessManager.ProcessControlBlock pcb, String name, int page){
 			requests.add(new RequestIOVirtualMemory(pcb.id, name, page));
+			so.readyVMToProcessRequest.release();
 		}
 
 		public void addBlockedProcess(ProcessManager.ProcessControlBlock pcb){
-			so.processManager.running.setStatus(ProcessStatus.BLOQUEADO);
+			so.processManager.running.setStatus(ProcessStatus.BLOQEUADO_VM);
+			blockedQueueByVM.add(so.processManager.running);
 			so.processManager.running = null;
-			blockedQueueByVM.add(pcb);
 		}
 
 		public boolean checkPageFault(ArrayList<Integer> pages, int logicalAddress){
@@ -727,15 +775,22 @@ public class Sistema {
 
 		public int getPage(int logicalAddress){
 			int page = (int) Math.floor(logicalAddress / so.tamPage);
+			if(page == 8){
+				System.out.println(logicalAddress);
+				System.out.println(so.tamPage);
+			}
+			
 			return page;		
 		}
 
 		public void onRequestIsReady(){
 			ProcessManager.ProcessControlBlock pcb = blockedQueueByVM.poll();
+			
 			try{
+				System.out.println("Finalizando requisição de VM " + pcb.id);
 				so.readyQueueControl.acquire();
 				so.processManager.readyQueue.add(pcb);
-				so.processManager.running.setStatus(ProcessStatus.PRONTO);
+				pcb.setStatus(ProcessStatus.PRONTO);	
 			}
 			catch (InterruptedException e) {
 				e.printStackTrace();
@@ -775,31 +830,53 @@ public class Sistema {
 		@Override
 		public void run() {
 			while(true){
-				if(so.vmManager.requests.size() > 0 && currentRequest == null){
+				try {
+					so.readyVMToProcessRequest.acquire();
 					currentRequest = so.vmManager.requests.poll();
+					System.out.println("Processando requisição de VM: " + currentRequest.pid);
 					processRequest();
-				}
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				}	
 			}
 		}
 
 		public void processRequest(){
-			int frameAddress = memoryMananger.alocByPageFault(this.currentRequest.name, this.currentRequest.page);
-			if(frameAddress != -1){
-				//Adiciona a página ao processo
-				so.processManager.getProcessById(this.currentRequest.pid).pages.set(this.currentRequest.page, frameAddress);
-				this.onCreateInterrupt();
+			try{
+				int frameAddress = memoryMananger.alocByPageFault(this.currentRequest.name, this.currentRequest.page);
+				if(frameAddress != -1){
+					//Adiciona a página ao processo
+					try {
+						so.processManager.getProcessById(this.currentRequest.pid).pages.set(this.currentRequest.page, frameAddress);
+						System.out.println("Tentar criar interrupção de VM: " + currentRequest.pid);
+						this.onCreateInterrupt();
+						System.out.println("Interrupção de VM criada " + currentRequest.pid);
+						System.out.println("Esperando interrupção de VM ser tratada " + currentRequest.pid);
+						so.interruptVMIsDone.acquire();
+						System.out.println("Interrupção de VM ser tratada com sucesso" + currentRequest.pid);
+						this.currentRequest  = null;
+					} catch (Exception e) {
+						e.printStackTrace();
+					}
+				} else {
+					throw new Exception();
+				}
+
+			} catch (Exception e) {
+				e.printStackTrace();
+				System.out.println(e);
 			}
 		}
 
 		public void onCreateInterrupt(){
-			hw.cpu.irpt = Interrupts.intIORequestVMIsReady;
+			hw.cpu.ih.setInterrupt(Interrupts.intIORequestVMIsReady);	 
 		}
 
 	    /**
 		* Limpa variaveis de controle da requisição atual para tratar a próxima
 		*/
 		public void onEndRequest(){
-			this.currentRequest  = null;
+			so.interruptVMIsDone.release();
 	   	}
 	}
 
@@ -1008,7 +1085,8 @@ public class Sistema {
 		public VirtualMemoryWorker vmWorker;
 		private Semaphore readyQueueControl;
 		public boolean useVirtualMemory;
-		public Semaphore readyIOToProcessRequest, inputShellIOReady, interruptIOIsDone;
+		public Semaphore readyIOToProcessRequest, inputShellIOReady, interruptIOIsDone, interruptVMIsDone, readyVMToProcessRequest;
+		public Semaphore setInterruptSemaphore;
 
 		public SO(HW hw, int tamPage, Semaphore _readyToExecute, Semaphore _finishedCPU, Semaphore _readyCPU) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
@@ -1027,6 +1105,9 @@ public class Sistema {
 			readyIOToProcessRequest = new Semaphore(0);
 			inputShellIOReady = new Semaphore(0);
 			interruptIOIsDone = new Semaphore(0);
+			interruptVMIsDone = new Semaphore(0);
+			readyVMToProcessRequest = new Semaphore(0);
+			setInterruptSemaphore = new Semaphore(1);
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -1644,7 +1725,8 @@ public class Sistema {
 		NOVO,          // O processo foi criado, mas ainda não está em execução.
 		PRONTO,        // O processo está pronto para ser executado e aguardando a CPU.
 		EXECUTANDO,    // O processo está atualmente em execução.
-		BLOQUEADO,     // O processo está bloqueado, aguardando algum evento (ex.: I/O).
+		BLOQUEADO_IO,     // O processo está bloqueado, aguardando algum evento (ex.: I/O).
+		BLOQEUADO_VM,
 		FINALIZADO;    // O processo terminou sua execução.
 	}
 
