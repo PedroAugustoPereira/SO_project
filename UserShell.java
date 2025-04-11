@@ -88,7 +88,13 @@ public class UserShell implements Runnable{
                 System.out.println("Encerrando...");
                 System.exit(0);
                 break;
-            // Adicione mais comandos conforme necessário.
+            case "in":
+                if((parts[1] == "" || parts[1] == null) && (parts[2] == "" || parts[2] == null)){
+                    System.out.println("Parâmetros inválidos.");
+                    return;
+                } 
+                this.utilities.in(parts[1], parts[2]);
+                break;   
             default:
                 System.out.println("Comando não reconhecido.");
         }
