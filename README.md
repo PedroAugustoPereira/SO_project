@@ -1,4 +1,4 @@
-# BGGP Operational System
+# BGGP Operating System
 
 Using Java to practice the concepts of our OS classes. This project implements the following features:
 
